@@ -5,8 +5,9 @@ import math
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
+import cairo
 import gi
 
 gi.require_version("Gtk", "4.0")
@@ -15,6 +16,8 @@ gi.require_version("Adw", "1")  # the chart shares the Libadwaita theme
 from asusius.ui.disk_map import (  # noqa: E402
     DiskUsageChart, MODE_RINGS, MODE_TREEMAP, tile_header_height,
 )
+from asusius.ui.charts import make_layout  # noqa: E402
+from gi.repository import PangoCairo  # noqa: E402
 
 from asusius.telemetry.disk_analyzer import scan_path  # noqa: E402
 
@@ -184,6 +187,24 @@ class GeometryTests(unittest.TestCase):
         self.assertGreaterEqual(preview.y, parent.y + band)
         self.assertEqual(tile_header_height(0, 580, 340), 0)
         self.assertEqual(tile_header_height(preview.depth, preview.w, preview.h), 0)
+
+    def test_treemap_keeps_folder_names_when_larger_fonts_crowd_out_sizes(self):
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, self.W, self.H)
+        context = cairo.Context(surface)
+        drawn = []
+
+        def large_layout(cr):
+            layout = make_layout(cr)
+            PangoCairo.context_set_resolution(layout.get_context(), 160)
+            return layout
+
+        with (patch("asusius.ui.disk_map.theme.is_dark", return_value=True),
+              patch("asusius.ui.disk_map.make_layout", side_effect=large_layout),
+              patch.object(PangoCairo, "show_layout",
+                           side_effect=lambda _cr, layout: drawn.append(layout.get_text()))):
+            DiskUsageChart._draw_treemap(self.canvas, context, self.W, self.H)
+
+        self.assertCountEqual(drawn, ["a", "b", "c"])
 
     def test_treemap_apparent_mode_changes_proportions(self):
         self.canvas.set_model(self.result, mode=MODE_TREEMAP, use_apparent=True)

@@ -37,7 +37,7 @@ MODE_TREEMAP = "treemap"
 MODE_RINGS = "rings"
 
 LABEL_MIN_W = 76.0
-_HEADER_H = 42.0            # full name and size, including padding
+_HEADER_H = 46.0            # full name and size at typical font scales
 _GAP = 2.0                  # crisp background-coloured gap between tiles
 _MAX_DEPTH = 2              # one preview level inside each labelled folder
 _MAX_RINGS = 6              # sunburst ring cap around the centre readout
@@ -784,13 +784,15 @@ class DiskUsageChart(Gtk.DrawingArea):
             size_l.set_text(fmt.bytes_(self._node_size(node)), -1)
             nw, nh = name_l.get_pixel_size()
             sw, sh = size_l.get_pixel_size()
-            if nh + sh > band - 8:
+            if nh > band - 6:
                 continue
+            show_size = nh + sh <= band - 6
             cr.save()
-            cr.rectangle(t.x + 2.0, t.y + 2.0, t.w - 4.0, band - 3.0)
+            cr.rectangle(t.x + 2.0, t.y + 2.0, t.w - 4.0, band - 4.0)
             cr.clip()
-            plate_w, plate_h = max(nw, sw) + 8.0, nh + sh + 2.0
             if best < _AA:
+                plate_w = (max(nw, sw) if show_size else nw) + 8.0
+                plate_h = nh + (sh if show_size else 0) + 2.0
                 plate = _plate_for(blended, ink)
                 cr.set_source_rgb(*plate)
                 _round_rect(cr, lx - 4.0, ly - 2.0, plate_w, plate_h, 3.0)
@@ -798,8 +800,9 @@ class DiskUsageChart(Gtk.DrawingArea):
             cr.set_source_rgb(*ink)
             cr.move_to(lx, ly)
             PangoCairo.show_layout(cr, name_l)
-            cr.move_to(lx, ly + nh)
-            PangoCairo.show_layout(cr, size_l)
+            if show_size:
+                cr.move_to(lx, ly + nh)
+                PangoCairo.show_layout(cr, size_l)
             cr.restore()
         if self._sel is None:
             return
