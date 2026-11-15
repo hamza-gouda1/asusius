@@ -145,7 +145,7 @@ class PerformancePage(Page):
         if t.cpu_power_w is not None:
             self._show_pill(self.live_power_pill, f"Package {fmt_num(t.cpu_power_w, 1)} W")
         try:
-            gov = self.win.hub.sampler.cpu.policy().get("governor")
+            gov = self.win.hub.sampler.cpu.policy(include_groups=False).get("governor")
         except Exception:
             gov = None
         if gov:

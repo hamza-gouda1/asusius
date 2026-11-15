@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) Hamza Gouda
-"""CPU: /proc/stat usage deltas, cpufreq, topology (P/E cores), load and uptime."""
+"""CPU: /proc/stat usage deltas, cpufreq, topology (P/E cores), caches, load and uptime."""
 from __future__ import annotations
 
 import os
+import re
 
 from .util import join, listdir, read_bytes, read_int, read_str
 
@@ -79,10 +80,86 @@ def parse_loadavg(text: str | None) -> tuple[float, float, float, int, int] | No
     return float(p[0]), float(p[1]), float(p[2]), int(run), int(total)
 
 
+_CACHE_SIZE = re.compile(r"(\d+)\s*([KMG])?(?:iB)?", re.IGNORECASE)
+_CACHE_MULT = {"K": 1024, "M": 1 << 20, "G": 1 << 30}
+
+
+def parse_cache_size(text: str | None) -> int | None:
+    """Cache size from sysfs ('4096 K' / '256K' / '32M' / bare) -> bytes; None if bad.
+
+    The kernel writes 0 when the size is unknown: that is absence, not a real zero
+    cache, so it returns None and the instance is skipped (never "N x 0 B").
+    """
+    if not text:
+        return None
+    m = _CACHE_SIZE.fullmatch(text.strip())
+    if not m:
+        return None
+    mult = _CACHE_MULT[m.group(2).upper()] if m.group(2) else 1
+    return int(m.group(1)) * mult or None
+
+
+def build_caches(root: str, cpus: list[int]) -> dict:
+    """Cache topology from /sys/devices/system/cpu/cpuN/cache (static; read once).
+
+    One instance per physical cache, deduped by (level, type, shared cpu set) where a
+    private cache (absent/empty shared_cpu_list) is identified by its owning cpu and
+    never merges across cores. Shape: {level: {type: [size groups]}} with each group
+    {"instances", "size_bytes", "scope"} and groups sorted largest first; scope is the
+    shared_cpu_list text ("0-1, 2-3, …" when one size spans several lists) or "per-core".
+    """
+    seen: dict[tuple, tuple] = {}  # (level, type, cpu set) -> (size, scope text, order)
+    for cpu in cpus:
+        base = join(root, f"sys/devices/system/cpu/cpu{cpu}/cache")
+        for idx in listdir(base):
+            d = os.path.join(base, idx)
+            level = read_int(os.path.join(d, "level"))
+            ctype = read_str(os.path.join(d, "type"))
+            if level is None or ctype not in ("Data", "Instruction", "Unified"):
+                continue
+            size = parse_cache_size(read_str(os.path.join(d, "size")))
+            if size is None:  # malformed or reported unknown (0): skip, never fabricate
+                continue
+            shared = read_str(os.path.join(d, "shared_cpu_list"))
+            try:
+                cpuset = parse_cpulist(shared)
+            except ValueError:
+                continue
+            if not cpuset and shared:  # list text that parses to nothing ("5-3"):
+                continue  # bad sysfs, skip the instance, never reclassify as private
+            if cpuset:
+                ident, scope, order = (level, ctype, frozenset(cpuset)), shared, min(cpuset)
+            else:  # absent/empty list: private to this cpu
+                ident, scope, order = (level, ctype, frozenset((cpu,))), "per-core", cpu
+            if ident not in seen:
+                seen[ident] = (size, scope, order)
+    groups: dict[tuple, list] = {}  # (level, type, size) -> [instances, {scope: order}]
+    for (level, ctype, _set), (size, scope, order) in seen.items():
+        cell = groups.setdefault((level, ctype, size), [0, {}])
+        cell[0] += 1
+        if scope not in cell[1] or order < cell[1][scope]:
+            cell[1][scope] = order
+    out: dict[int, dict[str, list]] = {}
+    for (level, ctype, size), (instances, scopes) in groups.items():
+        if len(scopes) == 1:
+            text = next(iter(scopes))
+        else:  # one size spanning several shared lists: join them, cpu order
+            text = ", ".join(s for s, _k in sorted(scopes.items(), key=lambda kv: kv[1]))
+        out.setdefault(level, {}).setdefault(ctype, []).append(
+            {"instances": instances, "size_bytes": size, "scope": text})
+    for cell in out.values():
+        for lst in cell.values():
+            lst.sort(key=lambda g: (-g["size_bytes"], g["scope"]))
+    return out
+
+
 class CpuReader:
     def __init__(self, root: str = "/") -> None:
         self.root = root
         self._prev: tuple | None = None  # (t, agg, per, misc)
+        self.want_policy = False
+        self._policy_at = float("-inf")
+        self._policy = None
         self.static = self._static()
         sysd = join(root, "sys/devices/system/cpu")
         self._freq_paths = [os.path.join(sysd, f"cpu{i}/cpufreq/scaling_cur_freq")
@@ -130,18 +207,34 @@ class CpuReader:
             "e_cores": len({(t["package"], t["core_id"]) for t in topo.values()
                             if t["kind"] == "E"}),
             "hybrid": bool(p_cores and e_cores),
+            "caches": build_caches(root, cpus),
         }
 
-    def policy(self) -> dict:
-        """Governor, EPP and driver of cpu0 (cheap; read when the CPU page refreshes)."""
-        d = join(self.root, "sys/devices/system/cpu/cpu0/cpufreq")
+    def policy(self, *, include_groups: bool = True) -> dict:
+        """Read cpu0 policy and optionally group logical CPUs by their policy."""
+        sysd = join(self.root, "sys/devices/system/cpu")
         pst = join(self.root, "sys/devices/system/cpu/intel_pstate")
+        pstate_status = read_str(os.path.join(pst, "status"))
+        no_turbo = read_str(os.path.join(pst, "no_turbo"))
+        def read_policy(i: int) -> tuple:
+            d = os.path.join(sysd, f"cpu{i}/cpufreq")
+            return (read_str(os.path.join(d, "scaling_driver")),
+                    read_str(os.path.join(d, "scaling_governor")),
+                    read_str(os.path.join(d, "energy_performance_preference")),
+                    pstate_status, no_turbo)
+
+        cpu0 = read_policy(0)
+        grouped: dict[tuple, list[int]] = {}
+        if include_groups:
+            for i in self.static["cpus"]:
+                key = cpu0 if i == 0 else read_policy(i)
+                grouped.setdefault(key, []).append(i)
+        groups = [{"driver": k[0], "governor": k[1], "epp": k[2], "pstate_status": k[3],
+                   "no_turbo": k[4], "cpus": v}
+                  for k, v in sorted(grouped.items(), key=lambda kv: kv[1][0])]
         return {
-            "driver": read_str(os.path.join(d, "scaling_driver")),
-            "governor": read_str(os.path.join(d, "scaling_governor")),
-            "epp": read_str(os.path.join(d, "energy_performance_preference")),
-            "pstate_status": read_str(os.path.join(pst, "status")),
-            "no_turbo": read_str(os.path.join(pst, "no_turbo")),
+            "driver": cpu0[0], "governor": cpu0[1], "epp": cpu0[2],
+            "pstate_status": pstate_status, "no_turbo": no_turbo, "groups": groups,
         }
 
     # -- per tick ---------------------------------------------------------------------
@@ -182,4 +275,14 @@ class CpuReader:
         out["uptime"] = float(up.split()[0]) if up else None
         out["procs_running"] = misc.get("procs_running")
         out["procs_blocked"] = misc.get("procs_blocked")
+        if self.want_policy:
+            if self._policy is None or now - self._policy_at >= 5:
+                self._policy = self.policy()
+                self._policy_at = now
+            out["policy"] = self._policy
+        else:
+            self._policy = None
+        # the per-tick info dict is rebuilt each tick, so the static cache topology is
+        # republished here every tick (a static-only field never reaches the pages)
+        out["caches"] = self.static.get("caches") or {}
         info["cpu"] = out
