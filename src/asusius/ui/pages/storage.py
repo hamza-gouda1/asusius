@@ -27,7 +27,7 @@ from ..widgets import label
 from .base import a11y_name
 from .monitor_base import MonitorPage, Panel, StatGrid, note, set_text
 
-SCAN_HEIGHT_WIDE, SCAN_HEIGHT_NARROW = 280, 230
+SCAN_HEIGHT_WIDE, SCAN_HEIGHT_NARROW = 340, 230
 LIST_WIDE_MIN_W = 330          # desktop: folder list beside the canvas at this width
 SHARE_METER_W = 72             # Share % bar width inside a folder row
 MENU_W = 34                    # row action menu column width (icon button)
@@ -179,6 +179,7 @@ class StoragePage(MonitorPage):
         self.dmap = DiskUsageChart(on_drill=self._on_drill, on_select=self._on_select,
                                    height=SCAN_HEIGHT_WIDE, trash_action=self._chart_trash,
                                    trash_allowed=self._trash_allowed)
+        self.dmap.set_valign(Gtk.Align.START)
         self.mid.append(self.dmap)
         self.list_wrap = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.list_wrap.set_size_request(LIST_WIDE_MIN_W, -1)
@@ -201,18 +202,23 @@ class StoragePage(MonitorPage):
 
     def _build_list(self) -> Gtk.Widget:
         head = Gtk.Box(spacing=8)
+        self._column_sizes = {
+            key: Gtk.SizeGroup(mode=Gtk.SizeGroupMode.HORIZONTAL)
+            for key in ("share", "size", "items", "mod", "actions")
+        }
         self._head_cells = {
             "folder": label("Folder", ("stat-caption",), wrap=True,
                             wrap_mode=Pango.WrapMode.WORD_CHAR, hexpand=True),
             "share": label("Share", ("stat-caption",)),
             "size": label("Size", ("stat-caption",), xalign=1.0),
             "items": label("Items", ("stat-caption",), xalign=1.0),
-            "mod": label("Modified", ("stat-caption",), wrap=True,
-                         wrap_mode=Pango.WrapMode.WORD_CHAR),
+            "mod": label("Modified", ("stat-caption",), xalign=1.0),
+            "actions": Gtk.Box(width_request=MENU_W),
         }
-        for w in self._head_cells.values():
+        for key, w in self._head_cells.items():
             head.append(w)
-        head.append(Gtk.Label())  # spacer matching the row menu column
+            if key in self._column_sizes:
+                self._column_sizes[key].add_widget(w)
         head.add_css_class("disk-map-head")
         self._head_box = head
         self.list_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -338,9 +344,14 @@ class StoragePage(MonitorPage):
             return
         skipped = res.stats["skipped"]
         mounts = res.stats["mounts_skipped"]
-        if skipped or mounts:
-            set_text(self.scan_note, f"Skipped {fmt.count(skipped)} unreadable entries and "
-                     f"{fmt.count(mounts)} mount points.")
+        omissions = [
+            f"{fmt.count(count)} {single if count == 1 else plural}"
+            for count, single, plural in ((skipped, "unreadable entry", "unreadable entries"),
+                                          (mounts, "mount point", "mount points"))
+            if count
+        ]
+        if omissions:
+            set_text(self.scan_note, "Skipped " + " and ".join(omissions) + ".")
             self.scan_note.set_visible(True)
         self.win.toast(f"Scan finished · {fmt.bytes_(self._metric(res.node(res.root)))}")
 
@@ -387,6 +398,7 @@ class StoragePage(MonitorPage):
     def _fill_crumbs(self) -> None:
         _clear(self.crumbs)
         res = self._result
+        self.up_btn.set_sensitive(res is not None and self._view_idx not in (None, res.root))
         if res is None or res.error:
             return
         chain: list[tuple[int, str]] = []
@@ -419,6 +431,9 @@ class StoragePage(MonitorPage):
 
     def _fill_list(self) -> None:
         self.list_nav.set_visible(False)
+        for previous in self._rows:
+            for key, group in self._column_sizes.items():
+                group.remove_widget(previous[key])
         child = self.list_box.get_first_child()
         while child is not None:
             nxt = child.get_next_sibling()
@@ -462,7 +477,7 @@ class StoragePage(MonitorPage):
             size_lab = label(fmt.bytes_(self._metric(n)), ("numeric", "stat-sub"),
                              xalign=1.0)
             items_lab = label(fmt.count(n.file_count), ("numeric", "stat-sub"), xalign=1.0)
-            mod_lab = label(_date(n.mtime), ("stat-sub",), xalign=1.0)
+            mod_lab = label(_date(n.mtime), ("numeric", "stat-sub"), xalign=1.0)
             menu = self._row_menu(c, n, path)
             row.append(name_lab)
             row.append(meter)
@@ -472,9 +487,11 @@ class StoragePage(MonitorPage):
             row.append(menu)
             self.list_box.append(row)
             self._row_for_idx[c] = row
-            self._rows.append({"idx": c, "row": row, "meter": meter,
-                               "size": size_lab, "items": items_lab,
-                               "mod": mod_lab})
+            cells = {"share": meter, "size": size_lab, "items": items_lab,
+                     "mod": mod_lab, "actions": menu}
+            for key, group in self._column_sizes.items():
+                group.add_widget(cells[key])
+            self._rows.append(cells)
         self._apply_row_levels()
 
     def _row_menu(self, c: int, n, path: str) -> Gtk.MenuButton:
@@ -524,8 +541,8 @@ class StoragePage(MonitorPage):
         cap.set_wrap(True)
         cap.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
         self.hogs_box.append(cap)
-        flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=False,
-                           column_spacing=6, row_spacing=6, max_children_per_line=6)
+        flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
+                           column_spacing=6, row_spacing=4, max_children_per_line=3)
         flow.add_css_class("disk-hogs")
         flow.set_valign(Gtk.Align.CENTER)
         for path, size, btag in big[:6]:
@@ -540,18 +557,16 @@ class StoragePage(MonitorPage):
         tag = reclaimable_tag(path) or btag
         name = os.path.basename(path) or path
         chip = Gtk.Button()
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2,
+        box = Gtk.Box(spacing=10,
                       margin_start=4, margin_end=4, margin_top=2, margin_bottom=2)
-        tag_lab = label(tag, ("disk-hog-tag",), xalign=0.5)
-        name_lab = label(name, (), wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR)
-        name_lab.set_max_width_chars(16)
+        name_lab = label(name, (), hexpand=True)
+        name_lab.set_max_width_chars(24)
         name_lab.set_ellipsize(Pango.EllipsizeMode.END)
         size_lab = label(fmt.bytes_(size), ("numeric", "stat-sub"), xalign=1.0)
-        box.append(tag_lab)
         box.append(name_lab)
         box.append(size_lab)
         chip.set_child(box)
-        chip.set_tooltip_text(path)
+        chip.set_tooltip_text(f"{path}\n{fmt.bytes_(size)} · {tag}")
         a11y_name(chip, f"{name} · {fmt.bytes_(size)}")
         chip.connect("clicked", lambda _b: self._open_files(os.path.dirname(path)))
         return chip
@@ -721,12 +736,14 @@ class StoragePage(MonitorPage):
 
     def _apply_level(self) -> None:
         narrow = self._level >= 2
+        stacked = self._level >= 1
         self.toggles_row.set_orientation(Gtk.Orientation.VERTICAL if narrow
                                          else Gtk.Orientation.HORIZONTAL)
-        self.mid.set_orientation(Gtk.Orientation.VERTICAL if narrow
+        self.mid.set_orientation(Gtk.Orientation.VERTICAL if stacked
                                  else Gtk.Orientation.HORIZONTAL)
+        self.mid.set_homogeneous(not stacked)
         self.dmap.set_content_height(SCAN_HEIGHT_NARROW if narrow else SCAN_HEIGHT_WIDE)
-        self.list_wrap.set_size_request(LIST_WIDE_MIN_W if not narrow else -1, -1)
+        self.list_wrap.set_size_request(LIST_WIDE_MIN_W if not stacked else -1, -1)
         for _n, (_p, g) in self.disks.items():
             g.set_min_children_per_line(2)
             g.set_max_children_per_line(2 if narrow else 4)

@@ -36,11 +36,10 @@ from .charts import _round_rect, make_layout
 MODE_TREEMAP = "treemap"
 MODE_RINGS = "rings"
 
-# label a tile only when it is at least 52x26 px (name line + size line fit)
-LABEL_MIN_W, LABEL_MIN_H = 52.0, 26.0
-_HEADER_H = 16.0            # label strip reserved inside a labelled dir tile
+LABEL_MIN_W = 76.0
+_HEADER_H = 42.0            # full name and size, including padding
 _GAP = 2.0                  # crisp background-coloured gap between tiles
-_MAX_DEPTH = 8              # treemap nesting cap (view root = depth 0)
+_MAX_DEPTH = 2              # one preview level inside each labelled folder
 _MAX_RINGS = 6              # sunburst ring cap around the centre readout
 _CENTER_FRAC = 0.30         # centre readout radius, fraction of the outer radius
 _MIN_WEDGE = 0.0012         # radians; slivers below this are not painted
@@ -133,6 +132,11 @@ def _bg_rgb() -> tuple:
 
 def _tile_alpha(depth: int) -> float:
     return _TILE_ALPHAS[min(depth, len(_TILE_ALPHAS) - 1)]
+
+
+def tile_header_height(depth: int, width: float, height: float) -> float:
+    """The same label band used by the treemap layout and painter."""
+    return _HEADER_H if depth == 1 and width >= LABEL_MIN_W and height >= _HEADER_H else 0.0
 
 
 # ---------------------------------------------------------------- squarified layout
@@ -446,13 +450,12 @@ class DiskUsageChart(Gtk.DrawingArea):
                  for c in self._sibling_order(result, idx)]
         if not pairs:
             return
-        labeled = w >= LABEL_MIN_W and h >= LABEL_MIN_H
-        header = _HEADER_H if (labeled and h >= 42.0) else 0.0
-        top = y + (header if header else _GAP)
+        header = tile_header_height(depth, w, h)
+        top = y + max(header, _GAP)
         ix = x + _GAP
         iy = top
         iw = max(0.0, w - 2.0 * _GAP)
-        ih = max(0.0, h - header - _GAP if header else h - 2.0 * _GAP)
+        ih = max(0.0, h - max(header, _GAP) - _GAP)
         if iw <= 0.0 or ih <= 0.0:
             return
         sizes = [size for _, size in pairs]
@@ -700,8 +703,7 @@ class DiskUsageChart(Gtk.DrawingArea):
     def _draw(self, _area, cr, w, h) -> None:
         """Draw func: empty state, or treemap/rings from the cached geometry."""
         if self._model is None:
-            self._draw_empty(cr, w, h, "No disk-usage data yet",
-                             "Open the Storage page to start a scan.")
+            self._draw_empty(cr, w, h, "Scan a folder to map its disk usage")
             return
         error = getattr(self._model, "error", None)
         if error:
@@ -744,37 +746,49 @@ class DiskUsageChart(Gtk.DrawingArea):
         tiles, _segments, _center = self._geometry(w, h)
         if not tiles:
             return
+        if len(tiles) == 1:
+            size = fmt.bytes_(self._node_size(self._model.node(tiles[0].idx)))
+            self._draw_empty(cr, w, h, "No subfolders to map", f"{size} in this folder")
+            return
         for t in tiles:
+            if t.depth == 0 or min(t.w, t.h) < 2:
+                continue
             rgb = charts.colour(SERIES_NAMES[t.hue % len(SERIES_NAMES)])
-            alpha = _tile_alpha(t.depth)
-            cr.set_source_rgba(*rgb, alpha)
+            cr.set_source_rgb(*_blend(rgb, bg, 0.91 if t.depth == 1 else 0.65))
             r = min(2.0, t.w / 4.0, t.h / 4.0)
             _round_rect(cr, t.x + 1.0, t.y + 1.0, max(1.0, t.w - 2.0),
                         max(1.0, t.h - 2.0), max(0.0, r))
             cr.fill()
         name_l = make_layout(cr)
-        name_l.set_font_description(theme.mono_font(9.0))
+        name_l.set_font_description(theme.mono_font(10.0, weight="Bold"))
         size_l = make_layout(cr)
-        size_l.set_font_description(theme.mono_font(8.0))
+        size_l.set_font_description(theme.mono_font(9.0))
+        for layout in (name_l, size_l):
+            layout.set_single_paragraph_mode(True)
+            layout.set_ellipsize(Pango.EllipsizeMode.END)
         for t in tiles:
-            if t.w < LABEL_MIN_W or t.h < LABEL_MIN_H:
+            band = tile_header_height(t.depth, t.w, t.h)
+            if not band:
                 continue
             node = self._model.node(t.idx)
             if node is None:
                 continue
             rgb = charts.colour(SERIES_NAMES[t.hue % len(SERIES_NAMES)])
-            blended = _blend(rgb, bg, _tile_alpha(t.depth))
+            blended = _blend(rgb, bg, 0.91)
             ink, best = _pick_ink(blended)
-            lx, ly = t.x + 6.0, t.y + 3.0
-            avail = max(8.0, t.w - 12.0)
-            name_l.set_ellipsize(Pango.EllipsizeMode.END)
+            lx, ly = t.x + 6.0, t.y + 4.0
+            avail = t.w - 12.0
             name_l.set_width(int(avail * Pango.SCALE))
             name_l.set_text(str(getattr(node, "name", "")) or "…", -1)
-            size_l.set_ellipsize(Pango.EllipsizeMode.END)
             size_l.set_width(int(avail * Pango.SCALE))
             size_l.set_text(fmt.bytes_(self._node_size(node)), -1)
             nw, nh = name_l.get_pixel_size()
             sw, sh = size_l.get_pixel_size()
+            if nh + sh > band - 8:
+                continue
+            cr.save()
+            cr.rectangle(t.x + 2.0, t.y + 2.0, t.w - 4.0, band - 3.0)
+            cr.clip()
             plate_w, plate_h = max(nw, sw) + 8.0, nh + sh + 2.0
             if best < _AA:
                 plate = _plate_for(blended, ink)
@@ -786,6 +800,7 @@ class DiskUsageChart(Gtk.DrawingArea):
             PangoCairo.show_layout(cr, name_l)
             cr.move_to(lx, ly + nh)
             PangoCairo.show_layout(cr, size_l)
+            cr.restore()
         if self._sel is None:
             return
         for t in tiles:
@@ -812,18 +827,18 @@ class DiskUsageChart(Gtk.DrawingArea):
             full = _wedge_path(cr, cx, cy, seg.r_in + 0.5, seg.r_out - 0.5,
                                seg.a0, seg.a1)
             cr.set_source_rgba(*rgb, alpha)
-            cr.fill()
-            if full:
-                cr.set_fill_rule(cairo.FillRule.WINDING)
+            cr.fill_preserve()
             cr.set_source_rgba(*bg, 1.0)
             cr.set_line_width(1.2)
             cr.stroke()
+            if full:
+                cr.set_fill_rule(cairo.FillRule.WINDING)
         wl = make_layout(cr)
         wl.set_font_description(theme.mono_font(8.0))
         for seg in segments:
             sweep = seg.a1 - seg.a0
             thick = seg.r_out - seg.r_in
-            if sweep < _WEDGE_LABEL_SWEEP or thick < _WEDGE_LABEL_THICK:
+            if seg.depth != 1 or sweep < _WEDGE_LABEL_SWEEP or thick < _WEDGE_LABEL_THICK:
                 continue
             wnode = self._model.node(seg.idx)
             if wnode is None:
@@ -839,6 +854,14 @@ class DiskUsageChart(Gtk.DrawingArea):
             ink, best = _pick_ink(blended)
             tx = cx + math.cos(mid) * mr - ww / 2.0
             ty = cy + math.sin(mid) * mr - wh / 2.0
+            # Fit the label within this wedge before painting it.
+            x0, y0, x1, y1 = tx - 4, ty - 2, tx + ww + 4, ty + wh + 2
+            nearest = math.hypot(max(x0 - cx, cx - x1, 0), max(y0 - cy, cy - y1, 0))
+            if nearest < seg.r_in or any(
+                    math.hypot(x - cx, y - cy) > seg.r_out
+                    or (math.atan2(y - cy, x - cx) - seg.a0) % math.tau > sweep
+                    for x in (x0, x1) for y in (y0, y1)):
+                continue
             if best < _AA:
                 cr.set_source_rgb(*_plate_for(blended, ink))
                 _round_rect(cr, tx - 3.0, ty - 1.0, ww + 6.0, wh + 2.0, 3.0)

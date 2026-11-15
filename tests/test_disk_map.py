@@ -12,7 +12,9 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
 gi.require_version("Adw", "1")  # the chart shares the Libadwaita theme
-from asusius.ui.disk_map import DiskUsageChart, MODE_RINGS, MODE_TREEMAP  # noqa: E402
+from asusius.ui.disk_map import (  # noqa: E402
+    DiskUsageChart, MODE_RINGS, MODE_TREEMAP, tile_header_height,
+)
 
 from asusius.telemetry.disk_analyzer import scan_path  # noqa: E402
 
@@ -171,6 +173,17 @@ class GeometryTests(unittest.TestCase):
                                      tile[parent].x + tile[parent].w + 1e-6)
                 self.assertLessEqual(tile[c].y + tile[c].h,
                                      tile[parent].y + tile[parent].h + 1e-6)
+
+    def test_nested_tiles_stay_below_their_folders_label_band(self):
+        tiles, _, _ = self.canvas._geometry(580, 340)
+        by_idx = {tile.idx: tile for tile in tiles}
+        preview, = [tile for tile in tiles if tile.depth == 2]
+        parent = by_idx[self.result.node(preview.idx).parent_idx]
+        band = tile_header_height(parent.depth, parent.w, parent.h)
+        self.assertGreater(band, 30)
+        self.assertGreaterEqual(preview.y, parent.y + band)
+        self.assertEqual(tile_header_height(0, 580, 340), 0)
+        self.assertEqual(tile_header_height(preview.depth, preview.w, preview.h), 0)
 
     def test_treemap_apparent_mode_changes_proportions(self):
         self.canvas.set_model(self.result, mode=MODE_TREEMAP, use_apparent=True)
