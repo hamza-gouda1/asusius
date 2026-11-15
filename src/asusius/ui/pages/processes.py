@@ -404,13 +404,17 @@ class ProcessesPage(MonitorPage):
                      f"{sum(p.threads for p in procs)} threads · CPU {total_cpu:.1f} %")
         else:
             groups: dict[str, list] = {}
+            own_pid = os.getpid()
             for p in procs:
                 app = p.app
                 hops, cur = 0, p
-                while app is None and hops < 8 and cur.ppid in by_pid and cur.ppid > 1:
+                while (cur.pid != own_pid and app is None and hops < 8
+                       and cur.ppid in by_pid and cur.ppid > 1):
                     cur = by_pid[cur.ppid]
                     app = cur.app
                     hops += 1
+                if cur.pid == own_pid:
+                    app = OWN_APP_ID
                 if app is None:
                     continue
                 groups.setdefault(app, []).append(p)
