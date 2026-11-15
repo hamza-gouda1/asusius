@@ -3,7 +3,10 @@
 """A fake /proc + /sys for the telemetry layer (development and screenshots only).
 
 `ensure(root)` adds the files the readers need to a tree made by
-backends.fake.build_fake_tree; `FakeWorld.advance(now)` moves the counters like a short
+backends.fake.build_fake_tree — including the deterministic disk-analyzer demo tree
+under `FAKE_HOME` (nested dirs, a hardlinked pair, sparse "large" files, a .cache and
+a node_modules dir) and the nvme0n1 metadata files (model/serial/wwn/scheduler) the
+Storage reader reports. `FakeWorld.advance(now)` moves the counters like a short
 gaming burst so graphs have shape. Everything is written inside `root`.
 """
 from __future__ import annotations
@@ -19,6 +22,50 @@ CLK = 100
 PAGE = 4096
 GIB = 1 << 30
 MEM_TOTAL = 16 * GIB - 420 * (1 << 20)
+
+# ---- disk analyzer demo tree (pages + tests; deterministic sizes) ----------------
+# FAKE_HOME stands in for the "/home" filesystem: a page points scan_path() at
+# <root>/FAKE_HOME and gets the same tree on every run. Files listed as sparse are
+# created with one written byte + truncate (large apparent size, ~4 KiB on disk), so
+# the allocated-vs-apparent difference is visible without burning real space. dup1.bin
+# and dup2.bin are one inode hardlinked under two names (the scanner must count it
+# once). The fake root cannot create real distinct st_dev mounts without root, so
+# mount variety lives in FAKE_MOUNTS metadata; the st_dev boundary rule itself is
+# unit-tested by injecting a foreign st_dev at the DirEntry layer (test_disk_analyzer).
+FAKE_HOME = "fake/home/user"
+NVME_MODEL = "WD PC SN5000S SDEQNSJ-512G-1002"
+NVME_SERIAL = "WD-5QJ4V7LR"
+NVME_WWN = "eui.0badb0d5512g1002"
+NVME_SCHEDULER = "none [mq-deadline] kyber bfq"
+# (path relative to FAKE_HOME, apparent size in bytes, sparse?)
+FAKE_HOME_FILES: tuple[tuple[str, int, bool], ...] = (
+    (".cache/mozilla/cache.bin", 3 << 20, False),
+    (".cache/thumbs.db", 64 << 10, False),
+    ("Documents/notes.md", 12 << 10, False),
+    ("Documents/report.pdf", 2 << 20, False),
+    ("Downloads/ubuntu-24.04.iso", 128 << 20, True),
+    ("Projects/app/__pycache__/main.cpython-311.pyc", 1 << 10, False),
+    ("Projects/app/bundle.node", 72 << 20, True),
+    ("Projects/app/node_modules/leftpad/index.js", 2 << 10, False),
+    ("Projects/app/node_modules/leftpad/leftpad.node", 68 << 20, True),
+    ("Projects/app/src/main.py", 8 << 10, False),
+    ("Projects/app/src/deep/deeper/leaf.py", 4 << 10, False),
+    ("VMs/win10.qcow2", 96 << 20, True),
+    ("Videos/capture.mkv", 96 << 20, True),
+    ("dup1.bin", 48 << 20, True),
+    ("swap.img", 64 << 20, True),
+)
+# Multiple mounts with distinct st_dev semantics: every mount point is its own
+# filesystem in the real world. The fake tree models them as metadata only (see the
+# FAKE_HOME comment); "/home" below is the mount whose content FAKE_HOME stands in for.
+FAKE_MOUNTS: tuple[dict, ...] = (
+    {"source": "/dev/nvme0n1p5", "mount": "/", "fstype": "ext4", "size": 468 * GIB,
+     "used": 291 * GIB, "avail": 153 * GIB, "disk": "nvme0n1"},
+    {"source": "/dev/nvme0n1p1", "mount": "/boot/efi", "fstype": "vfat",
+     "size": 256 << 20, "used": 38 << 20, "avail": 218 << 20, "disk": "nvme0n1"},
+    {"source": "/dev/nvme0n1p6", "mount": "/home", "fstype": "ext4",
+     "size": 512 * GIB, "used": 300 * GIB, "avail": 212 * GIB, "disk": "nvme0n1"},
+)
 
 # (pid, ppid, comm, cmdline, cgroup unit, base cpu % of one core, private MiB, gpu)
 PROCS = [
@@ -72,6 +119,14 @@ PROCS = [
 def _w(path: Path, text) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f"{text}\n")
+
+
+def _sparse(path: Path, apparent: int) -> None:
+    """Sparse file: apparent size `apparent`, one written byte (~4 KiB on disk)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(b"\0")
+        f.truncate(apparent)
 
 
 def load_at(t: float) -> float:
@@ -130,9 +185,12 @@ def ensure(root: str | Path) -> None:
     _w(root / "sys/class/power_supply/ADP0/type", "Mains")
     _w(root / "sys/class/power_supply/ADP0/online", 0)
     blk = root / "sys/block/nvme0n1"
-    _w(blk / "device/model", "WD PC SN5000S SDEQNSJ-512G-1002")
+    _w(blk / "device/model", NVME_MODEL)
+    _w(blk / "device/serial", NVME_SERIAL)
+    _w(blk / "device/wwid", NVME_WWN)
     _w(blk / "size", 1_000_215_216)
     _w(blk / "queue/rotational", 0)
+    _w(blk / "queue/scheduler", NVME_SCHEDULER)
     _w(blk / "removable", 0)
     (root / "sys/block/loop0").mkdir(parents=True, exist_ok=True)
     for name, wifi, state in (("wlp0s20f3", True, "up"), ("enp0s31f6", False, "down"),
@@ -160,11 +218,18 @@ def ensure(root: str | Path) -> None:
     _w(pci / "0000:01:00.0/device", "0x2dd8")
     _w(pci / "0000:00:02.0/power_state", "D0")
     _w(pci / "0000:01:00.0/power_state", "D0")
-    _w(root / "fake/mounts.json", json.dumps([
-        {"source": "/dev/nvme0n1p5", "mount": "/", "fstype": "ext4", "size": 468 * GIB,
-         "used": 291 * GIB, "avail": 153 * GIB, "disk": "nvme0n1"},
-        {"source": "/dev/nvme0n1p1", "mount": "/boot/efi", "fstype": "vfat",
-         "size": 256 << 20, "used": 38 << 20, "avail": 218 << 20, "disk": "nvme0n1"}]))
+    _w(root / "fake/mounts.json", json.dumps(FAKE_MOUNTS))
+    home = root / FAKE_HOME
+    for rel, size, sparse in FAKE_HOME_FILES:
+        p = home / rel
+        if sparse:
+            _sparse(p, size)
+        else:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(bytes(size))
+    dup1 = home / "dup1.bin"
+    if not (home / "dup2.bin").exists():  # one inode, two names; the scanner dedups it
+        os.link(dup1, home / "dup2.bin")
     for pid, ppid, comm, cmd, unit, _cpu, mem, gpu in PROCS:
         d = root / "proc" / str(pid)
         d.mkdir(parents=True, exist_ok=True)
@@ -190,7 +255,7 @@ class FakeWorld:
         self.t: float | None = None
         self.cpu = [[0] * 8 for _ in range(NCPU)]  # user nice system idle iowait irq soft st
         self.ctxt = self.intr = 0
-        self.disk = [0, 0, 0, 0, 0]
+        self.disk = [0, 0, 0, 0, 0, 0, 0]
         self.net = {"wlp0s20f3": [0, 0, 0, 0], "enp0s31f6": [0, 0, 0, 0],
                     "docker0": [0, 0, 0, 0]}
         self.proc_ticks = {p[0]: 0 for p in PROCS}
@@ -260,9 +325,11 @@ class FakeWorld:
         d[2] += int(wr / 32768) + 1
         d[3] += int(wr / 512)
         d[4] += int(dt * 1000 * min(1.0, 0.02 + 0.5 * L ** 2))
+        d[5] += max(1, int(rd / 65536 * (0.4 + L)))
+        d[6] += max(1, int(wr / 32768 * (0.8 + L)))
         (r / "proc/diskstats").write_text(
-            f" 259 0 nvme0n1 {d[0]} 0 {d[1]} 0 {d[2]} 0 {d[3]} 0 0 {d[4]} {d[4]} 0 0 0 0 0 0\n"
-            f" 259 3 nvme0n1p5 {d[0]} 0 {d[1]} 0 {d[2]} 0 {d[3]} 0 0 {d[4]} {d[4]} 0 0 0 0\n"
+            f" 259 0 nvme0n1 {d[0]} 0 {d[1]} {d[5]} {d[2]} 0 {d[3]} {d[6]} 0 {d[4]} {d[5] + d[6]} 0 0 0 0 0 0\n"
+            f" 259 3 nvme0n1p5 {d[0]} 0 {d[1]} {d[5]} {d[2]} 0 {d[3]} {d[6]} 0 {d[4]} {d[5] + d[6]} 0 0 0 0\n"
             "   7 0 loop0 3 0 24 0 0 0 0 0 0 1 0 0 0 0 0 0 0\n")
         w = self.net["wlp0s20f3"]
         w[0] += int(dt * (40e3 + 4.2e6 * L * (0.5 + 0.5 * math.sin(now / 4))))

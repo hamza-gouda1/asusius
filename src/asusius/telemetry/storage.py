@@ -13,25 +13,32 @@ SKIP_FS = {"squashfs", "overlay", "tmpfs", "devtmpfs", "ramfs", "iso9660"}
 
 
 def parse_diskstats(data: bytes) -> dict[str, tuple[int, ...]]:
-    """{name: (reads, sectors_read, writes, sectors_written, io_ms)}."""
+    """{name: (reads, sectors_read, writes, sectors_written, io_ms, read_ms, write_ms)}."""
     out = {}
     for line in data.split(b"\n"):
         p = line.split()
-        if len(p) < 14:
+        if len(p) < 13:
             continue
-        out[p[2].decode()] = (int(p[3]), int(p[5]), int(p[7]), int(p[9]), int(p[12]))
+        out[p[2].decode()] = (int(p[3]), int(p[5]), int(p[7]), int(p[9]),
+                              int(p[12]), int(p[6]), int(p[10]))
     return out
 
 
 def disk_rates(cur: tuple[int, ...], prev: tuple[int, ...], dt: float) -> dict | None:
-    if dt <= 0 or any(c < p for c, p in zip(cur, prev)):
+    """Read/write rates and mean completion latency between two snapshots."""
+    if dt <= 0 or len(cur) != len(prev) or any(c < p for c, p in zip(cur, prev)):
         return None
+    d_ios = (cur[0] - prev[0]) + (cur[2] - prev[2])
+    await_ms = None
+    if d_ios and len(cur) >= 7:
+        await_ms = ((cur[5] - prev[5]) + (cur[6] - prev[6])) / d_ios
     return {
         "read": (cur[1] - prev[1]) * SECTOR / dt,
         "write": (cur[3] - prev[3]) * SECTOR / dt,
         "busy": min(100.0, (cur[4] - prev[4]) / (dt * 10.0)),  # ms busy per s -> %
         "riops": (cur[0] - prev[0]) / dt,
         "wiops": (cur[2] - prev[2]) / dt,
+        "await_ms": await_ms,
     }
 
 
@@ -78,7 +85,11 @@ class Storage:
             if read_str(os.path.join(d, "removable")) == "1":
                 kind = "Removable"
             out[name] = {"model": model, "size": None if size is None else size * SECTOR,
-                         "kind": kind}
+                         "kind": kind,
+                         "serial": read_str(os.path.join(d, "device/serial")),
+                         "wwn": read_str(os.path.join(d, "device/wwid"))
+                             or read_str(os.path.join(d, "wwid")),
+                         "scheduler": read_str(os.path.join(d, "queue/scheduler"))}
         return out
 
     def _parent_disk(self, dev: str) -> str | None:
@@ -129,6 +140,9 @@ class Storage:
         return out
 
     def sample(self, now: float, vals: dict, info: dict) -> None:
+        """Emit disk.{name}.{read,write,busy,riops,wiops,await_ms} into vals and
+        {disks, totals[, mounts]} into info["disk"]; nothing on the first sample or
+        after a counter reset (the Store keeps those slots as NaN gaps)."""
         if now - self._disks_t >= MOUNTS_EVERY_S:
             self._disks_t = now
             self.disks = self._disks()
@@ -155,6 +169,10 @@ class Storage:
             vals[f"disk.{name}.read"] = r["read"]
             vals[f"disk.{name}.write"] = r["write"]
             vals[f"disk.{name}.busy"] = r["busy"]
+            vals[f"disk.{name}.riops"] = r["riops"]
+            vals[f"disk.{name}.wiops"] = r["wiops"]
+            if r["await_ms"] is not None:
+                vals[f"disk.{name}.await_ms"] = r["await_ms"]
             tot_r += r["read"]
             tot_w += r["write"]
         if have:
