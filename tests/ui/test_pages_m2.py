@@ -17,7 +17,10 @@ from unittest.mock import patch  # noqa: E402
 import gi  # noqa: E402
 
 gi.require_version("Gtk", "4.0")
+gi.require_version("Gdk", "4.0")
 gi.require_version("Adw", "1")
+
+from gi.repository import Gdk  # noqa: E402
 
 from asusius.backends.fake import build_fake_tree  # noqa: E402
 from asusius.telemetry import fmt  # noqa: E402
@@ -232,6 +235,11 @@ def _chart_with(page, key: str):
 
 class WiringTests(unittest.TestCase):
     """Pages over LiveHub/Sampler fake trees: new cells exist and absent data shows '–'."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        if Gdk.Display.get_default() is None:
+            raise unittest.SkipTest("GTK widget tests require a display")
 
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
