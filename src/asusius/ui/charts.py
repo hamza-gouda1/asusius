@@ -84,10 +84,8 @@ class Chart(Gtk.DrawingArea):
     dense_grid=True (opt-in) draws half-step minor horizontal gridlines when the plot is
     tall enough (ph >= 140); in compact cards it instead raises the target ticks 3 -> 6
     and also draws the vertical time gridlines. monitor=True (opt-in) is the plot-forward
-    layout: y labels move inside the plot, right-aligned at its right edge, the left
-    gutter shrinks to a hairline and hover readouts are kept. Monitor charts draw those
-    inside labels at every width — there is no w < 480 conditional; regular charts keep
-    their left gutter however narrow the widget gets.
+    layout: y labels sit in a measured gutter to the right of the data, with a small
+    left inset and hover readouts.
     """
 
     def __init__(self, hub, lines: list[Line], window_s: float = 120.0,
@@ -187,8 +185,7 @@ class Chart(Gtk.DrawingArea):
         if self.compact:
             gl, gr, gt, gb = 0.0, lab_w + 8.0, 6.0, 16.0
         elif self.monitor:
-            # plot-forward: the left gutter shrinks to a hairline, labels go inside
-            gl, gr, gt, gb = 6.0, 8.0, 8.0, 20.0
+            gl, gr, gt, gb = 6.0, lab_w + 14.0, 8.0, 20.0
         else:
             gl, gr, gt, gb = max(30.0, lab_w + 10.0), 8.0, 8.0, 20.0
         pw, ph = max(1.0, w - gl - gr), max(1.0, h - gt - gb)
@@ -218,9 +215,7 @@ class Chart(Gtk.DrawingArea):
             if self.compact:
                 _text(cr, layout, text, w, y, label_rgba, "right", "middle")
             elif self.monitor:
-                # plot-forward: labels sit inside the plot, right-aligned at its right
-                # edge, at every width; regular charts keep their gutter however narrow
-                _text(cr, layout, text, gl + pw, y, label_rgba, "right", "middle")
+                _text(cr, layout, text, w - 4, y, label_rgba, "right", "middle")
             else:
                 _text(cr, layout, text, gl - 6, y, label_rgba, "right", "middle")
         if ticks and ticks[-1] < ymax - step * 0.05:  # unlabelled top edge (e.g. RAM size)

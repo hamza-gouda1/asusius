@@ -104,9 +104,8 @@ class MemoryPage(MonitorPage):
             self.bar_caption.append(lab)
             self.bar_labels[k] = lab
         p.append(self.bar_caption)
-        p.append(note("In use = total − available (what `free` calls used). Cache is memory "
-                      "the kernel can reclaim on demand (available − free). The three parts "
-                      "add up to the total; free is the space above the chart."))
+        self.bar.set_tooltip_text("In use is total minus available memory. Cache is "
+                                  "reclaimable memory. Free is currently unused.")
         self.stats = StatGrid(2, 4)
         for key, cap, tip in (
                 ("total", "Total", "MemTotal: RAM the kernel manages"),
