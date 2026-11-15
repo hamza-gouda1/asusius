@@ -22,6 +22,7 @@ CLK = 100
 PAGE = 4096
 GIB = 1 << 30
 MEM_TOTAL = 16 * GIB - 420 * (1 << 20)
+ZRAM_TABLE_BYTES = 64 * PAGE  # zram0's fixed table overhead on top of the compressed pool
 
 # ---- disk analyzer demo tree (pages + tests; deterministic sizes) ----------------
 # FAKE_HOME stands in for the "/home" filesystem: a page points scan_path() at
@@ -153,13 +154,38 @@ def ensure(root: str | Path) -> None:
         _w(d / "cpufreq/cpuinfo_min_freq", 800_000)
         _w(d / "cpufreq/base_frequency", 2_200_000 if p else 1_600_000)
         _w(d / "cpufreq/scaling_cur_freq", 800_000)
-    c0 = cpu / "cpu0/cpufreq"
-    _w(c0 / "scaling_driver", "intel_pstate")
-    _w(c0 / "scaling_governor", "powersave")
-    _w(c0 / "energy_performance_preference", "balance_performance")
+        _w(d / "cpufreq/scaling_driver", "intel_pstate")
+        _w(d / "cpufreq/scaling_governor", "powersave")
+        _w(d / "cpufreq/energy_performance_preference",
+           "balance_performance" if p else "power")  # two policy groups: 0-15 and 16-23
+        # §2.1 cache layout: L1d/L1i private per core, L2 shared per P pair or private
+        # per E core, L3 Unified shared by every core (identical content under cpuN)
+        cache = d / "cache"
+        _w(cache / "index0/level", 1)
+        _w(cache / "index0/type", "Data")
+        _w(cache / "index0/size", "48K")
+        _w(cache / "index1/level", 1)
+        _w(cache / "index1/type", "Instruction")
+        _w(cache / "index1/size", "32K")
+        _w(cache / "index2/level", 2)
+        _w(cache / "index2/type", "Data")
+        if p:
+            lo = i - i % 2
+            _w(cache / "index2/size", "4096 K")
+            _w(cache / "index2/shared_cpu_list", f"{lo}-{lo + 1}")
+        else:
+            _w(cache / "index2/size", "2048 K")
+            _w(cache / "index2/shared_cpu_list", "")
+        _w(cache / "index3/level", 3)
+        _w(cache / "index3/type", "Unified")
+        _w(cache / "index3/size", "24576 K")
+        _w(cache / "index3/shared_cpu_list", "0-23")
     _w(cpu / "intel_pstate/status", "active")
     _w(cpu / "intel_pstate/no_turbo", 0)
     _w(root / "proc/cpuinfo", "processor\t: 0\nmodel name\t: Intel(R) Core(TM) i7-14650HX\n")
+    _w(root / "proc/pressure/memory",
+       "some avg10=0.00 avg60=0.00 avg300=0.12 total=42130000\n"
+       "full avg10=0.00 avg60=0.00 avg300=0.03 total=9120000\n")
     hw = root / "sys/class/hwmon/hwmon7"
     _w(hw / "temp1_label", "Package id 0")
     cores = sorted({(i // 2) * 4 for i in range(P_THREADS)} | set(range(32, 40)))
@@ -193,6 +219,13 @@ def ensure(root: str | Path) -> None:
     _w(blk / "queue/scheduler", NVME_SCHEDULER)
     _w(blk / "removable", 0)
     (root / "sys/block/loop0").mkdir(parents=True, exist_ok=True)
+    # zram swap devices (separate from the physical swap and from zswap): zram0 carries
+    # the load-animated pool, zram1 sits idle with a measured all-zero mm_stat
+    zorig = int(1.75 * GIB)
+    zcompr = zorig // 4
+    _w(root / "sys/block/zram0/mm_stat",
+       f"{zorig} {zcompr} {int(zcompr * 1.1) + ZRAM_TABLE_BYTES} 0 0 0 0 0")
+    _w(root / "sys/block/zram1/mm_stat", "0 0 0 0 0 0 0 0")
     for name, wifi, state in (("wlp0s20f3", True, "up"), ("enp0s31f6", False, "down"),
                               ("docker0", None, "down")):
         d = root / "sys/class/net" / name
@@ -213,11 +246,24 @@ def ensure(root: str | Path) -> None:
     _w(card / "device/driver_name", "i915")
     _w(card / "device/address", "0000:00:02.0")
     _w(card / "device/device", "0xa78b")
+    # iGPU PCIe link, read through the card's device dir while runtime PM allows it
+    _w(card / "device/current_link_speed", "8.0 GT/s")
+    _w(card / "device/max_link_speed", "16.0 GT/s")
+    _w(card / "device/current_link_width", 8)
+    _w(card / "device/max_link_width", 16)
     pci = root / "sys/bus/pci/devices"
     _w(pci / "0000:00:02.0/device", "0xa78b")
     _w(pci / "0000:01:00.0/device", "0x2dd8")
     _w(pci / "0000:00:02.0/power_state", "D0")
     _w(pci / "0000:01:00.0/power_state", "D0")
+    # dGPU PCIe link files on its PCI device dir; read only while the GPU is awake
+    dg = pci / "0000:01:00.0"
+    _w(dg / "current_link_speed", "16.0 GT/s")
+    _w(dg / "max_link_speed", "16.0 GT/s")
+    _w(dg / "current_link_width", 16)
+    _w(dg / "max_link_width", 16)
+    if not (dg / "power/runtime_status").exists():
+        _w(dg / "power/runtime_status", "active")  # awake so QA reads the link
     _w(root / "fake/mounts.json", json.dumps(FAKE_MOUNTS))
     home = root / FAKE_HOME
     for rel, size, sparse in FAKE_HOME_FILES:
@@ -317,6 +363,12 @@ class FakeWorld:
             f"Mapped: {900 << 10} kB\nSwapTotal: {4 << 20} kB\n"
             f"SwapFree: {int((4 << 20) * (0.62 - 0.05 * L))} kB\nZswap: 0 kB\nZswapped: 0 kB\n"
             f"CommitLimit: {12 << 20} kB\nCommitted_AS: {int((14 + 6 * L) * (1 << 20))} kB\n")
+        # zram pool tracks the workload (orig ≈ (0.5+2.5·L) GiB, ~4× compression,
+        # mem_used_total ≈ pool + table overhead); zram1 stays a measured zero
+        zorig = int((0.5 + 2.5 * L) * GIB)
+        zcompr = max(1, zorig // 4)
+        _w(r / "sys/block/zram0/mm_stat",
+           f"{zorig} {zcompr} {int(zcompr * 1.1) + ZRAM_TABLE_BYTES} 0 0 0 0 0")
         d = self.disk
         rd = (2 + 180 * L ** 3) * (1 << 20) * dt
         wr = (1 + 40 * L * abs(math.sin(now / 9))) * (1 << 20) * dt
@@ -328,8 +380,10 @@ class FakeWorld:
         d[5] += max(1, int(rd / 65536 * (0.4 + L)))
         d[6] += max(1, int(wr / 32768 * (0.8 + L)))
         (r / "proc/diskstats").write_text(
-            f" 259 0 nvme0n1 {d[0]} 0 {d[1]} {d[5]} {d[2]} 0 {d[3]} {d[6]} 0 {d[4]} {d[5] + d[6]} 0 0 0 0 0 0\n"
-            f" 259 3 nvme0n1p5 {d[0]} 0 {d[1]} {d[5]} {d[2]} 0 {d[3]} {d[6]} 0 {d[4]} {d[5] + d[6]} 0 0 0 0\n"
+            f" 259 0 nvme0n1 {d[0]} 0 {d[1]} {d[5]} {d[2]} 0 {d[3]} {d[6]} 0 {d[4]} "
+            f"{d[5] + d[6]} 0 0 0 0 0 0\n"
+            f" 259 3 nvme0n1p5 {d[0]} 0 {d[1]} {d[5]} {d[2]} 0 {d[3]} {d[6]} 0 {d[4]} "
+            f"{d[5] + d[6]} 0 0 0 0\n"
             "   7 0 loop0 3 0 24 0 0 0 0 0 0 1 0 0 0 0 0 0 0\n")
         w = self.net["wlp0s20f3"]
         w[0] += int(dt * (40e3 + 4.2e6 * L * (0.5 + 0.5 * math.sin(now / 4))))
@@ -396,7 +450,7 @@ class FakeWorld:
                           1200 + 1500 * game_dgpu), "mem_mhz": 12001, "video_mhz": 1800,
                       "temp": int(46 + 32 * L), "power": round(12 + 78 * game_dgpu, 1),
                       "power_limit": 100.0, "fan": None, "pstate": 0 if L > 0.15 else 2,
-                      "enc": 0.0, "dec": 0.0},
+                      "enc": round(15 * L), "dec": round(8 * L)},
             "procs": {"3488": {"type": "C+G", "vram": vram - (380 << 20),
                                "sm": round(100 * game_dgpu)},
                       "1460": {"type": "G", "vram": 2 << 20, "sm": None}}}))
