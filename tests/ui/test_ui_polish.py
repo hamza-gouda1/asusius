@@ -433,8 +433,8 @@ class PageCallbackSafetyTests(unittest.TestCase):
                     store = SimpleNamespace(last=values.get, last_t=10.0)
                     hub = SimpleNamespace(
                         store=store,
-                        info={"cpu": {"load": (1.1, 0.8, 0.4, 2, 400), "uptime": 7200}},
-                        sampler=SimpleNamespace(cpu=SimpleNamespace(policy=lambda: policy)),
+                        info={"cpu": {"load": (1.1, 0.8, 0.4, 2, 400), "uptime": 7200,
+                                      "policy": policy}},
                     )
                     stats = build_grid("util", "freq", "temp", "power", "load", "uptime",
                                        "threads", "ctxt", "intr", "governor")
@@ -444,7 +444,6 @@ class PageCallbackSafetyTests(unittest.TestCase):
                         static=static,
                         stats=stats,
                         policy_grid=policy_grid,
-                        _policy_t=-1e9,
                         _pol=None,
                         rapl_note=Mock(get_label=Mock(return_value="prev")),
                         redraw=Mock(),

@@ -1,12 +1,83 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) Hamza Gouda
-"""Processor detail: utilisation, per-core grid, frequency, temperatures, policy."""
+"""Processor detail: utilisation, per-core grid, frequency, temperatures, caches, policy."""
 from __future__ import annotations
 
 from ...telemetry import fmt
 from ..charts import CoreGrid, Line, legend
 from ..viewmodels import cpu_vendor_info, fmt_temp, temp_unit_label, temp_value
 from .monitor_base import WINDOW_S, MonitorPage, StatGrid, note, set_text
+
+
+def _ranges(cpus: list[int]) -> str:
+    """[0, 1, 2, 5] -> '0-2, 5' (', '-joined, like the cache scope text)."""
+    out: list[str] = []
+    start = prev = None
+    for c in sorted(cpus):
+        if start is None:
+            start = prev = c
+        elif c == prev + 1:
+            prev = c
+        else:
+            out.append(str(start) if start == prev else f"{start}-{prev}")
+            start = prev = c
+    if start is not None:
+        out.append(str(start) if start == prev else f"{start}-{prev}")
+    return ", ".join(out)
+
+
+def format_policy_groups(groups: list[dict] | None) -> str | None:
+    """Governor·EPP text when policy() reports several distinct CPU groups.
+
+    One (or zero) group returns None: the caller keeps the cpu0-based display, which is
+    identical to the single group. Several groups -> "governor · epp (cpulist)" joined
+    with " · "; an absent EPP stays "–" (never inferred from the governor).
+    """
+    if not groups or len(groups) < 2:
+        return None
+    parts = []
+    for g in groups:
+        text = f"{g.get('governor') or '–'} · {g.get('epp') or '–'}"
+        cpus = g.get("cpus") or []
+        if cpus:
+            text += f" ({_ranges(cpus)})"
+        parts.append(text)
+    return " · ".join(parts)
+
+
+def _cache_scope(scope: str) -> str:
+    """'0-1, 2-3' -> 'shared by CPUs 0-1, 2-3'; a mixed group renders each part.
+
+    A size group may mix shared lists with private per-core instances of the same
+    size; joining those verbatim would read 'shared by CPUs 0-1, per-core'.
+    """
+    parts = scope.split(", ")
+    if "per-core" not in parts:
+        return f"shared by CPUs {scope}"
+    return "; ".join("per core" if p == "per-core" else f"shared by CPUs {p}"
+                     for p in parts)
+
+
+def cache_cells(caches: dict) -> list[tuple[str, str, str, str]]:
+    """One cell per (level, type) that parsed: (key, caption, value, tooltip).
+
+    The value joins the size groups ("8 × 4.0 MiB · 8 × 2.0 MiB"); the tooltip gives
+    the (level, type) total plus each group's scope ("shared by CPUs 0-15" / "per
+    core"). Levels/types that never parsed produce no cell at all.
+    """
+    out: list[tuple[str, str, str, str]] = []
+    for level in sorted(caches):
+        for ctype in sorted(caches[level]):
+            groups = caches[level][ctype]
+            key = f"L{level}-{ctype}"
+            caption = f"L{level} · {ctype}"
+            value = " · ".join(f"{g['instances']} × {fmt.bytes_(g['size_bytes'])}"
+                               for g in groups)
+            total = sum(g["instances"] * g["size_bytes"] for g in groups)
+            tip = " · ".join(f"{g['instances']} × {fmt.bytes_(g['size_bytes'])} "
+                             f"({_cache_scope(g['scope'])})" for g in groups)
+            out.append((key, caption, value, f"{fmt.bytes_(total)} total: {tip}"))
+    return out
 
 
 class CpuPage(MonitorPage):
@@ -27,7 +98,8 @@ class CpuPage(MonitorPage):
                                                      ("I/O wait", "slate")]))
         p.append(self.chart([Line("cpu.user", "user"), Line("cpu.system", "system", "gold"),
                              Line("cpu.iowait", "I/O wait", "slate")], stacked=True,
-                            y_fixed=(0, 100), fmt=pct, height=190, window_s=WINDOW_S))
+                            y_fixed=(0, 100), fmt=pct, height=190, window_s=WINDOW_S,
+                            dense_grid=True, monitor=True))
         self.stats = StatGrid(2, 5)
         for key, cap, tip in (
                 ("util", "Utilisation", "Busy time across all logical CPUs (/proc/stat)"),
@@ -44,6 +116,14 @@ class CpuPage(MonitorPage):
         p.append(self.stats)
         self.rapl_note = note("")
         p.append(self.rapl_note)
+        cp = self.panel("Caches")
+        self.cache_grid = StatGrid(2, 4)
+        cells = cache_cells(st.get("caches") or {})
+        for key, cap, value, tip in cells:
+            self.cache_grid.add(key, cap, tip)
+            self.cache_grid.set(key, value, tip)
+        cp.append(self.cache_grid)
+        cp.set_visible(bool(cells))
         cores = self.panel("Logical CPUs", suffix=legend(
             [("performance core", "primary"), ("efficient core", "gold")]
             if st["hybrid"] else []))
@@ -55,19 +135,27 @@ class CpuPage(MonitorPage):
         fp = self.panel("Clock and temperature")
         fp.append(legend([("average clock (GHz)", "primary")]))
         fp.append(self.chart([Line("cpu.freq.avg", "avg", scale=1 / 1000)], floor=0,
-                             min_span=5, fmt=lambda v: f"{v:g} GHz", height=120))
+                             min_span=5, fmt=lambda v: f"{v:g} GHz", height=120,
+                             dense_grid=True, monitor=True))
         self.temp_legend = legend([(f"package {temp_unit_label()}", "rose")])
         fp.append(self.temp_legend)
         self.temp_chart = self.chart([Line("temp.cpu", "pkg", "rose")], y_fixed=(20, 100),
-                                     fmt=lambda v: f"{temp_value(v)}°", height=120)
+                                     fmt=lambda v: f"{temp_value(v)}°", height=120,
+                                     dense_grid=True, monitor=True)
         fp.append(self.temp_chart)
         self.policy_grid = StatGrid(2, 4)
         for key, cap in (("driver", "Scaling driver"), ("pstate", vinfo["pstate_title"]),
                          ("turbo", "Turbo"), ("range", "Clock range")):
             self.policy_grid.add(key, cap)
         fp.append(self.policy_grid)
-        self._policy_t = -1e9
         self._pol: dict | None = None
+
+    def on_shown(self) -> None:
+        self.hub.sampler.cpu.want_policy = True
+        super().on_shown()
+
+    def on_hidden(self) -> None:
+        self.hub.sampler.cpu.want_policy = False
 
     def refresh_temperature_unit(self) -> None:
         from gi.repository import Gtk
@@ -100,11 +188,14 @@ class CpuPage(MonitorPage):
         g.set("threads", f"{load[3]} · {load[4]}" if load else "–")
         g.set("ctxt", fmt.count(st.last("cpu.ctxt")) + " /s")
         g.set("intr", fmt.count(st.last("cpu.intr")) + " /s")
-        now = st.last_t or 0
-        if now - self._policy_t > 5:
-            self._policy_t = now
-            pol = self._pol = self.hub.sampler.cpu.policy()
-            g.set("governor", f"{pol.get('governor') or '–'} · {pol.get('epp') or '–'}")
+        pol = cpu.get("policy")
+        if pol is not None and pol is not self._pol:
+            self._pol = pol
+            groups_text = format_policy_groups(pol.get("groups"))
+            if groups_text is not None:
+                g.set("governor", groups_text)
+            else:
+                g.set("governor", f"{pol.get('governor') or '–'} · {pol.get('epp') or '–'}")
             pg = self.policy_grid
             pg.set("driver", pol.get("driver") or "–")
             vinfo = cpu_vendor_info(self.static, pol)

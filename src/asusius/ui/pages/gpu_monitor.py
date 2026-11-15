@@ -15,6 +15,53 @@ from .monitor_base import MonitorPage, StatGrid, note, set_text
 
 pct = lambda v: f"{v:.0f}%"  # noqa: E731
 
+LINK_TIP = "Negotiated PCIe link, current vs maximum (read from sysfs only while awake)"
+
+
+def link_text(link: dict | None) -> str | None:
+    """'8.0 GT/s ×8 (max 16.0 GT/s ×16)' from info[...]['link']; None when absent.
+
+    Whatever fields the reader published are shown (a suspended GPU publishes no link
+    at all, so the cell falls back to "–" — a cached maximum is never republished).
+    """
+    if not link:
+        return None
+
+    def part(speed, width):
+        bits = []
+        if speed is not None:
+            bits.append(str(speed))
+        if width is not None:
+            bits.append(f"×{width}")
+        return " ".join(bits)
+
+    cur = part(link.get("current_speed"), link.get("current_width"))
+    mx = part(link.get("max_speed"), link.get("max_width"))
+    if cur and mx:
+        return f"{cur} (max {mx})"
+    if mx:
+        return f"(max {mx})"  # only the maximum is known: never pass it off as current
+    return cur or None
+
+
+def video_entries(engines: list[str] | None) -> list[tuple[str, str]]:
+    """Display rows for the engines a provider actually reports: (key, label) pairs.
+
+    enc + dec both present -> separate 'Video encode' / 'Video decode' rows; only the
+    combined 'video' engine -> one 'Video (combined)' row; a single enc or dec shows
+    what exists. Engines the provider does not publish never appear, and non-video
+    engines keep their ENGINE_NAMES labels.
+    """
+    superseded = {"enc", "dec"}.issubset(engines or ())
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for e in engines or []:
+        if e in seen or (e == "video" and superseded):
+            continue
+        seen.add(e)
+        out.append((e, "Video (combined)" if e == "video" else ENGINE_NAMES.get(e, e.title())))
+    return out
+
 
 class ProcTable(Gtk.Box):
     """Small table of processes using a GPU (rebuilt only when the set changes)."""
@@ -99,7 +146,8 @@ class IntelGpuPage(MonitorPage):
                               ("req", "Requested clock", "gt_cur_freq_mhz"),
                               ("range", "Clock range", "min – max (RP0)"),
                               ("clients", "DRM clients", None),
-                              ("throttle", "Throttling", "throttle_reason_status")):
+                              ("throttle", "Throttling", "throttle_reason_status"),
+                              ("link", "PCIe link", LINK_TIP)):
             self.stats.add(key, cap, tip)
         p.append(self.stats)
         p.append(note("Utilisation is summed from the per-client engine time the DRM driver "
@@ -143,10 +191,16 @@ class IntelGpuPage(MonitorPage):
         g.set("clients", str(ig.get("clients", "–")))
         thr = ig.get("throttled")
         g.set("throttle", "–" if thr is None else ("yes" if thr else "no"))
-        for e in ig.get("engines") or []:
+        g.set("link", link_text(ig.get("link")) or "–")
+        entries = video_entries(ig.get("engines"))
+        visible_engines = {key for key, _ in entries}
+        for e in self._engines_shown - visible_engines:
+            self.engines.show(e, False)
+        for e, lab in entries:
             if e not in self._engines_shown:
                 self._engines_shown.add(e)
-                self.engines.add(e, ENGINE_NAMES.get(e, e.title()))
+                self.engines.add(e, lab)
+            self.engines.show(e, True)
             self.engines.set(e, fmt.pct(st.last(f"igpu.engine.{e}"), 1))
         per = ig.get("per_pid") or {}
         rows = sorted(((pid, v) for pid, v in per.items() if v >= 0.05), key=lambda x: -x[1])
@@ -169,21 +223,32 @@ class NvidiaGpuPage(MonitorPage):
                                                      ("memory controller", "gold")]))
         p.append(self.chart([Line("dgpu.util", "GPU"),
                              Line("dgpu.mem_util", "memory", "gold", fill=False)],
-                            y_fixed=(0, 100), fmt=pct, height=170))
+                            y_fixed=(0, 100), fmt=pct, height=170,
+                            dense_grid=True, monitor=True))
         self.stats = StatGrid(2, 4)
         for key, cap, tip in (("util", "GPU busy", None), ("vram", "VRAM used", None),
                               ("gr", "Graphics clock", None), ("mem", "Memory clock", None),
                               ("temp", "Temperature", None), ("power", "Power · limit", None),
                               ("pstate", "Performance state", "P0 fastest … P8/P12 idle"),
+                              ("link", "PCIe link", LINK_TIP),
                               ("fan", "Fan", None), ("enc", "Encoder · decoder", None),
                               ("driver", "Driver", None), ("runtime", "Runtime PM", None),
                               ("source", "Source", None)):
             self.stats.add(key, cap, tip)
         p.append(self.stats)
+        vp0 = self.panel("Video")
+        vp0.set_visible(False)  # built only from series the provider actually publishes
+        self.video_panel = vp0
+        self._video_mode: str | None = None
+        self._video_provider = None
+        self._video_keys: set[str] = set()
+        self._video_shown: set[str] = set()
+        self._video_widgets = []
+        self._video_chart = None
         vp = self.panel("Video memory")
         self.vram_chart = self.chart([Line("dgpu.vram", "VRAM", "slate", scale=1 / (1 << 30))],
                                      floor=0, min_span=0.5, fmt=lambda v: f"{v:g} GiB",
-                                     height=120)
+                                     height=120, dense_grid=True, monitor=True)
         vp.append(self.vram_chart)
         cp = self.panel("Clock, temperature and power")
         cp.append(legend([("graphics MHz", "primary")]))
@@ -220,19 +285,22 @@ class NvidiaGpuPage(MonitorPage):
             set_text(self.sleep_note, DGPU_LOST_TEXT)
             self.sleep_note.set_tooltip_text(dg.get("reason") or None)
             g.set("runtime", "power error · driver lost the GPU")
-            for k in ("util", "vram", "gr", "mem", "temp", "power", "pstate", "fan", "enc",
-                      "driver", "source"):
+            for k in ("util", "vram", "gr", "mem", "temp", "power", "pstate", "link", "fan",
+                      "enc", "driver", "source"):
                 g.set(k, "–")
+            self.video_panel.set_visible(False)
             self.procs.set_rows([])
             self.redraw()
             return
-        if not dg.get("present") or not dg.get("backend"):
+        if not dg.get("present") or not dg.get("backend") or dg.get("state") == "unavailable":
             set_text(self.name, dg.get("name") or vendor)
             set_text(self.sub, f"No readings from {vendor}. Check that the driver is "
                                "installed and working, then reopen this page.")
             self.sleep_note.set_visible(False)
             self.sub.set_tooltip_text(dg.get("reason") or None)
             set_text(self.state_label, "Unavailable")
+            self.video_panel.set_visible(False)
+            g.set("link", "–")
             self.procs.set_rows([])
             return
         self.sub.set_tooltip_text(None)
@@ -248,6 +316,7 @@ class NvidiaGpuPage(MonitorPage):
             set_text(self.state_label, f"Sleeping ({ps or 'D3'})" if stt == "sleeping"
                      else "Idle, released")
             self.sleep_note.set_visible(True)
+            self.video_panel.set_visible(False)
             if stt == "sleeping":
                 set_text(self.sleep_note, f"The GPU is powered down ({ps or 'D3'}). Reading "
                          "its sensors would wake it and cost battery, so nothing is queried "
@@ -265,12 +334,15 @@ class NvidiaGpuPage(MonitorPage):
                 for k in ("util", "vram", "gr", "mem", "temp", "power", "pstate", "fan",
                           "enc"):
                     g.set(k, "–")
+            g.set("link", link_text(dg.get("link")) or "–")
             self.procs.set_rows([])
             self.redraw()
             return
         set_text(self.state_label, "Awake")
         self.sleep_note.set_visible(False)
         self._fill(dg.get("q") or {}, dg.get("static") or {}, st)
+        g.set("link", link_text(dg.get("link")) or "–")
+        self._update_video(dg, st)
         rows = []
         for pid, pr in sorted((dg.get("procs") or {}).items(),
                               key=lambda kv: -(kv[1].get("vram") or 0)):
@@ -300,3 +372,63 @@ class NvidiaGpuPage(MonitorPage):
               "Laptop GPUs report no fan to NVML; this is the GPU fan from the ASUS hwmon")
         g.set("enc", f"{fmt.pct(q.get('enc'))} · {fmt.pct(q.get('dec'))}")
         g.set("driver", sta.get("driver_version") or "–")
+
+    def _clear_video(self) -> None:
+        for widget in self._video_widgets:
+            self.video_panel.remove(widget)
+        self._video_widgets.clear()
+        if self._video_chart is not None:
+            self.charts.remove(self._video_chart)
+            self._video_chart = None
+        self._video_shown.clear()
+        self._video_mode = None
+
+    def _update_video(self, dg: dict, st) -> None:
+        """Display advertised engine rows or the NVML counters observed so far."""
+        provider = dg.get("backend")
+        if provider != self._video_provider:
+            self._clear_video()
+            self._video_keys.clear()
+            self._video_provider = provider
+        engines = dg.get("engines")
+        q = dg.get("q") or {}
+        if engines:
+            if self._video_mode != "engines":
+                self._clear_video()
+                self.video_stats = StatGrid(2, 4)
+                self.video_panel.append(self.video_stats)
+                self._video_widgets.append(self.video_stats)
+                self._video_mode = "engines"
+            entries = video_entries(engines)
+            visible_engines = {key for key, _ in entries}
+            for key in self._video_shown - visible_engines:
+                self.video_stats.show(key, False)
+            for key, lab in entries:
+                if key not in self._video_shown:
+                    self._video_shown.add(key)
+                    self.video_stats.add(key, lab)
+                self.video_stats.show(key, True)
+                self.video_stats.set(key, fmt.pct(st.last(f"dgpu.engine.{key}"), 1))
+            self.video_panel.set_visible(True)
+            return
+
+        keys = self._video_keys | {key for key in ("enc", "dec") if q.get(key) is not None}
+        if not keys:
+            self.video_panel.set_visible(False)
+            return
+        if keys != self._video_keys or self._video_mode != "chart":
+            self._clear_video()
+            self._video_keys = keys
+            series = [(f"dgpu.{key}", title, colour)
+                      for key, title, colour in (("enc", "encode", "primary"),
+                                                 ("dec", "decode", "gold"))
+                      if key in keys]
+            self._video_chart = self.chart(
+                [Line(key, title, colour, fill=False) for key, title, colour in series],
+                y_fixed=(0, 100), fmt=pct, height=110)
+            self._video_widgets = [legend([(title, colour) for _, title, colour in series]),
+                                   self._video_chart]
+            for widget in self._video_widgets:
+                self.video_panel.append(widget)
+            self._video_mode = "chart"
+        self.video_panel.set_visible(True)
