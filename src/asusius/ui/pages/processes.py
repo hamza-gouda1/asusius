@@ -166,6 +166,8 @@ class Row(GObject.Object):
         if col == "name":
             return self.name + (f"  ({self.count})" if self.kind == "app" and self.count > 1
                                 else "")
+        if self.kind == "section":
+            return ""
         if col == "pid":
             return str(self.pid) if self.pid else ""
         if col == "cpu":
@@ -782,7 +784,7 @@ class ProcessesPage(MonitorPage):
                              {SECTION_APPS: app_rows, SECTION_PROCS: flat_rows}, force)
         finally:
             self._rebuilding = False
-        for cache in (self.rows, self.flat):
+        for cache in (self.sections, self.rows, self.flat):
             for r in cache.values():
                 for col, w in r.cells.items():
                     text = r.text(col)

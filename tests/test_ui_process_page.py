@@ -233,6 +233,16 @@ class Totals(unittest.TestCase):
 
 
 class Sections(unittest.TestCase):
+    def test_bound_section_label_tracks_the_count(self):
+        p = fake_page(web_procs())
+        name = p.sections[SECTION_APPS].cells["name"] = Mock()
+        name.get_label.return_value = "Apps (0)"
+
+        ProcessesPage._rebuild(p)
+
+        name.set_label.assert_called_with("Apps (1)")
+        self.assertEqual(p.sections[SECTION_APPS].text("cpu"), "")
+
     def test_running_asusius_pid_overrides_a_missing_or_inherited_app_id(self):
         for scope_app in (None, "org.chromium.Chromium"):
             with self.subTest(scope_app=scope_app):
