@@ -5,13 +5,15 @@
 Power rule: the dGPU is only queried while its runtime PM state is "active". Any NVML
 call or nvidia-smi run resumes a suspended GPU, so a sleeping GPU is reported as
 sleeping and left alone. When it is awake but idle, the NVML session is closed and
-polling backs off so the driver can put it back to sleep.
+polling backs off so the driver can put it back to sleep. The same whitelist gates the
+sysfs PCIe link reads, which never touch NVML (so they work for every backend).
 """
 from __future__ import annotations
 
 import ctypes
 import json
 
+from .gpu_intel import pcie_link
 from .pci import display_devices, pci_name, runtime_state
 from .util import join
 
@@ -227,6 +229,7 @@ class NvidiaGpu:
         self.backend = None
         self.reason = None
         self.static: dict = {}
+        self._link_max: dict | None = None  # cached PCIe max link, never in `static`
         self.handle = None
         self._idle = 0
         self._hold_until = 0.0
@@ -375,8 +378,9 @@ class NvidiaGpu:
             vals["dgpu.power"] = q.get("power")
             vals["dgpu.gr_mhz"] = q.get("gr_mhz")
             vals["dgpu.mem_mhz"] = q.get("mem_mhz")
-            if q.get("enc") is not None:
-                vals["dgpu.enc"], vals["dgpu.dec"] = q.get("enc"), q.get("dec")
+            for engine in ("enc", "dec"):
+                if q.get(engine) is not None:
+                    vals[f"dgpu.{engine}"] = q[engine]
             out["q"] = q
             self.last_q, self.last_q_t = q, now
             if self.backend == "nvidia-smi":
@@ -389,6 +393,12 @@ class NvidiaGpu:
                 self._idle = 0
                 self._hold_until = now + IDLE_BACKOFF_S
                 out["released"] = True
+            elif runtime_state(self.dev["dir"])[0] in ("active", "unsupported"):
+                # Link attributes may access PCI config space. Only read after a
+                # successful sample and never while the poller is backing off.
+                link, self._link_max = pcie_link(self.dev["dir"], self._link_max)
+                if link:
+                    out["link"] = link
         out["state"] = "awake"
         out["static"] = self.static
         out["procs"] = self.procs

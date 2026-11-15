@@ -189,18 +189,61 @@ ENGINE_NAMES = {
 }
 
 
+def read_pcie_link(dev_dir: str | None) -> dict | None:
+    """PCIe link attributes from a PCI device dir ('8.0 GT/s', '16'); None when unreadable.
+
+    Callers must only invoke this while the device is known to be awake — a suspended
+    device is never probed (reading nothing here is the whole point of the gate).
+    """
+    if not dev_dir:
+        return None
+    out = {"current_speed": read_str(os.path.join(dev_dir, "current_link_speed")),
+           "max_speed": read_str(os.path.join(dev_dir, "max_link_speed")),
+           "current_width": read_str(os.path.join(dev_dir, "current_link_width")),
+           "max_width": read_str(os.path.join(dev_dir, "max_link_width"))}
+    return out if any(v is not None for v in out.values()) else None
+
+
+def pcie_link(dev_dir: str | None,
+              prev_max: dict | None) -> tuple[dict | None, dict | None]:
+    """(link info for info[...]['link'], updated max-link cache).
+
+    Current speed/width are re-read on every awake sample; the max speed/width are
+    cached in the caller's dedicated attribute (never `static`, which fake mode
+    reassigns) and reused when a later read cannot see the max files.
+    """
+    link = read_pcie_link(dev_dir)
+    if link is None:
+        return None, prev_max
+    mx = {"max_speed": link.get("max_speed"), "max_width": link.get("max_width")}
+    known = dict(prev_max or {})
+    known.update({key: value for key, value in mx.items() if value is not None})
+    link.update(known)
+    return link, known or None
+
+
+def igpu_pm_open(dev_dir: str | None) -> bool:
+    """True when iGPU device attrs may be read: no runtime PM file (None), or
+    runtime_status active/unsupported. Suspended/suspending/resuming/error -> False."""
+    if not dev_dir:
+        return False
+    rs = read_str(os.path.join(dev_dir, "power/runtime_status"))
+    return rs is None or rs in ("active", "unsupported")
+
+
 class IntelGpu:
     def __init__(self, root: str = "/") -> None:
         self.root = root
         found = find_intel_card(root)
         self.card, self.pdev, self.driver = found if found else (None, None, None)
+        self.dev_dir = os.path.join(self.card, "device") if self.card else None
         self.clients = DrmClients(root, self.pdev) if self.pdev else None
         self._rc6_prev: tuple[float, int] | None = None
+        self._link_max: dict | None = None  # cached PCIe max link, never in `static`
         self.name = None
         if self.card:
             from .pci import pci_name
-            dev = os.path.join(self.card, "device")
-            did = read_str(os.path.join(dev, "device"))
+            did = read_str(os.path.join(self.dev_dir, "device"))
             label = pci_name("8086", did) if did else None
             self.name = f"Intel {label}" if label else "Intel integrated graphics"
         self.per_pid: dict[int, float] = {}
@@ -255,4 +298,8 @@ class IntelGpu:
             out["per_pid"] = per_pid
         thr = read_str(os.path.join(self.card, "gt/gt0/throttle_reason_status"))
         out["throttled"] = thr == "1" if thr is not None else None
+        if igpu_pm_open(self.dev_dir):
+            link, self._link_max = pcie_link(self.dev_dir, self._link_max)
+            if link:
+                out["link"] = link
         info["igpu"] = out

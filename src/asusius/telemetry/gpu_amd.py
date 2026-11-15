@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 import re
 
-from .gpu_intel import DrmClients
+from .gpu_intel import DrmClients, igpu_pm_open, pcie_link
 from .pci import pci_name, runtime_state
 from .sensors import channels
 from .util import join, listdir, read_int, read_str
@@ -73,6 +73,7 @@ class AmdGpu:
         self.backend = "sysfs" if self.card else None
         self.reason = None if self.card else "no amdgpu DRM device"
         self.static: dict = {}
+        self._link_max: dict | None = None  # cached PCIe max link, never in `static`
         self.name: str | None = self._resolve_label()
 
     def _resolve_label(self) -> str | None:
@@ -175,6 +176,10 @@ class AmdGpu:
             out["engines"] = sorted(set(engines) | set(cap))
             out["clients"] = len(self.clients.paths)
             out["per_pid"] = per_pid
+        if igpu_pm_open(self.dev_dir):
+            link, self._link_max = pcie_link(self.dev_dir, self._link_max)
+            if link:
+                out["link"] = link
         info["igpu"] = out
 
     def _sample_dgpu(self, now: float, vals: dict, info: dict, label: str) -> None:
@@ -190,6 +195,12 @@ class AmdGpu:
             out["state"] = "sleeping"
             info["dgpu"] = out
             return
+        # the NVIDIA whitelist ("active"/"unsupported") also gates the new device-attr
+        # reads here: a suspended or unreadable device is never probed for its link
+        if rs in ("active", "unsupported"):
+            link, self._link_max = pcie_link(self.dev_dir, self._link_max)
+            if link:
+                out["link"] = link
         hw = self._hwmon_dir()
         gr_mhz, lo, hi = self._read_sclk(hw)
         mem_mhz = self._read_mclk(hw)
@@ -202,12 +213,15 @@ class AmdGpu:
             self.static = {"name": label, "driver_version": "amdgpu",
                            "max_gr_mhz": hi, "min_gr_mhz": lo}
         if self.clients is not None:
-            engines, per_pid, _ = self.clients.sample(now)
+            engines, per_pid, cap = self.clients.sample(now)
             self.per_pid = per_pid
             self.procs = {pid: {"type": "G", "vram": None, "sm": pct}
                           for pid, pct in per_pid.items()}
+            for e, v in engines.items():  # same derivation as the iGPU engine keys
+                vals[f"dgpu.engine.{e}"] = v
             if busy is None and engines:
                 busy = max(engines.values())
+            out["engines"] = sorted(set(engines) | set(cap))
         util = float(busy) if busy is not None else None
         q = {"util": util, "mem_util": None, "vram_used": vram_used, "vram_total": vram_total,
              "gr_mhz": gr_mhz, "mem_mhz": mem_mhz, "temp": temp, "power": power}
