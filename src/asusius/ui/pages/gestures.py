@@ -252,6 +252,10 @@ class GesturesPage(Page):
         self.speed_adj = Gtk.Adjustment(value=0, lower=-1, upper=1, step_increment=0.05,
                                         page_increment=0.25)
         self.speed_scale = Gtk.Scale(adjustment=self.speed_adj, draw_value=False, hexpand=True)
+        # Scrolling the preferences page over this slider must not change pointer speed.
+        for controller in tuple(self.speed_scale.observe_controllers()):
+            if isinstance(controller, Gtk.EventControllerScroll):
+                self.speed_scale.remove_controller(controller)
         a11y_name(self.speed_scale, "Touchpad speed")
         self.speed_adj.connect("value-changed", self._speed)
         self.speed_row = Adw.ActionRow(title="Speed",

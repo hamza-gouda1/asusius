@@ -48,7 +48,7 @@ for _d in (_EXT_SCHEMAS, _OTHER_SCHEMAS):
     subprocess.run(["glib-compile-schemas", str(_d)], check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-from gi.repository import Gio  # noqa: E402  (only once the environment is in place)
+from gi.repository import Gio, GLib  # noqa: E402  (only once the environment is in place)
 
 # Prime GLib's cached default schema source with system paths (for touchpad schemas),
 # then isolate XDG_DATA_DIRS so host /usr/share/gnome-shell/extensions never leaks in.
@@ -68,6 +68,18 @@ def ext_source():
     return Gio.SettingsSchemaSource.new_from_directory(str(_EXT_SCHEMAS), None, False)
 
 
+def kf_backend() -> Gio.SettingsBackend:
+    """An explicit keyfile backend bound to the test's temporary config.
+
+    The process-wide default GSettings backend is bound by whatever imports Gtk
+    first (the canvas-double tests pull Gtk before this module runs), so the
+    GSETTINGS_BACKEND env route is unreliable in the full suite: every Settings
+    here passes this backend explicitly instead.
+    """
+    return Gio.keyfile_settings_backend_new(
+        str(_CONFIG / "glib-2.0" / "settings" / "keyfile"), "/", "")
+
+
 def other_source():
     """A schema source that has schemas but not the extension's: how a machine without
     asusius-quick looks."""
@@ -77,10 +89,10 @@ def other_source():
 def reset_all():
     """Back to schema defaults: the keyfile backend is per process, so tests reset
     every key they touch instead of relying on a fresh store."""
-    pad = touchpad.TouchpadSettings()
+    pad = touchpad.TouchpadSettings(backend=kf_backend())
     for k in TOUCHPAD_KEYS:
         pad.settings.reset(k)
-    gest = touchpad.GestureSettings(source=ext_source())
+    gest = touchpad.GestureSettings(source=ext_source(), backend=kf_backend())
     for k in GESTURE_KEYS:
         gest.settings.reset(k)
 
@@ -98,12 +110,12 @@ class ExtensionPresence(unittest.TestCase):
     """The page's 'installed / not installed' state row rests on this."""
 
     def test_found_with_an_explicit_source(self):
-        gest = touchpad.GestureSettings(source=ext_source())
+        gest = touchpad.GestureSettings(source=ext_source(), backend=kf_backend())
         self.assertTrue(gest.available)
         self.assertIsNotNone(gest.settings)
 
     def test_missing_from_a_source_without_the_schema(self):
-        gest = touchpad.GestureSettings(source=other_source())
+        gest = touchpad.GestureSettings(source=other_source(), backend=kf_backend())
         self.assertFalse(gest.available)
         self.assertIsNone(gest.settings)
         for call in (gest.enabled, gest.launch_app,
@@ -119,29 +131,29 @@ class ExtensionPresence(unittest.TestCase):
         ext_dir = _DATA / "gnome-shell" / "extensions" / touchpad.EXTENSION_UUID
         shutil.copytree(_EXT_SCHEMAS, ext_dir / "schemas", dirs_exist_ok=True)
         try:
-            gest = touchpad.GestureSettings()
+            gest = touchpad.GestureSettings(backend=kf_backend())
             self.assertTrue(gest.available)
         finally:
             shutil.rmtree(ext_dir)
-        self.assertFalse(touchpad.GestureSettings().available)  # gone again: not installed
+        self.assertFalse(touchpad.GestureSettings(backend=kf_backend()).available)  # gone again: not installed
 
     def test_found_in_xdg_data_dirs_system_package(self):
         """System package layout (Arch PKGBUILD / distro /usr/share install) is discovered."""
         ext_dir = _SYS_DATA / "gnome-shell" / "extensions" / touchpad.EXTENSION_UUID
         shutil.copytree(_EXT_SCHEMAS, ext_dir / "schemas", dirs_exist_ok=True)
         try:
-            gest = touchpad.GestureSettings()
+            gest = touchpad.GestureSettings(backend=kf_backend())
             self.assertTrue(gest.available)
             self.assertEqual(touchpad.extension_dir(), str(ext_dir))
         finally:
             shutil.rmtree(ext_dir)
-        self.assertFalse(touchpad.GestureSettings().available)
+        self.assertFalse(touchpad.GestureSettings(backend=kf_backend()).available)
 
 
 class GestureKeys(unittest.TestCase):
     def setUp(self):
         reset_all()
-        self.gest = touchpad.GestureSettings(source=ext_source())
+        self.gest = touchpad.GestureSettings(source=ext_source(), backend=kf_backend())
 
     def test_defaults_follow_the_schema(self):
         self.assertFalse(self.gest.enabled())
@@ -165,9 +177,14 @@ class GestureKeys(unittest.TestCase):
         self.assertFalse(self.gest.hides_power_mode())
         self.gest.set_hides_power_mode(True)
         # a second, independent Settings object reads the same store
-        again = touchpad.GestureSettings(source=ext_source())
+        again = touchpad.GestureSettings(source=ext_source(), backend=kf_backend())
         self.assertEqual(again.binding("gesture-swipe4-up"), "overview")
-        # and the keyfile backend wrote to the temporary config, not the real one
+        # and the keyfile backend wrote to the temporary config, not the real one.
+        # The keyfile backend defers the disk write to an idle on the default main
+        # context; pump it so the store reaches disk even with no loop running.
+        ctx = GLib.main_context_default()
+        while ctx.iteration(False):
+            pass
         keyfile = _CONFIG / "glib-2.0" / "settings" / "keyfile"
         self.assertTrue(keyfile.is_file())
         self.assertIn("gesture-swipe4-up", keyfile.read_text())
@@ -210,7 +227,7 @@ class GestureKeys(unittest.TestCase):
             tree.write(Path(folder) / _EXT_XML.name)
             subprocess.run(["glib-compile-schemas", "--strict", folder], check=True)
             source = Gio.SettingsSchemaSource.new_from_directory(folder, None, False)
-            older = touchpad.GestureSettings(source=source)
+            older = touchpad.GestureSettings(source=source, backend=kf_backend())
             self.assertEqual(older.binding_choices("gesture-hold4"), ())
             self.assertEqual(older.binding("gesture-hold4"), "none")
             self.assertIn("overview", older.binding_choices("gesture-swipe4-up"))
@@ -229,7 +246,7 @@ class GestureKeys(unittest.TestCase):
         subprocess.run(["glib-compile-schemas", str(old)], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         src = Gio.SettingsSchemaSource.new_from_directory(str(old), None, False)
-        gest = touchpad.GestureSettings(source=src)
+        gest = touchpad.GestureSettings(source=src, backend=kf_backend())
         self.assertTrue(gest.available)
         self.assertIsNone(gest.hides_power_mode())
         self.assertFalse(gest.set_hides_power_mode(True))
@@ -253,7 +270,7 @@ class GesturePageLabels(unittest.TestCase):
 
     def setUp(self):
         reset_all()
-        self.gest = touchpad.GestureSettings(source=ext_source())
+        self.gest = touchpad.GestureSettings(source=ext_source(), backend=kf_backend())
         self.gest.settings.reset("hide-night-light")
 
     def test_every_action_the_wrapper_allows_has_a_label(self):
@@ -308,7 +325,7 @@ class GesturePageLabels(unittest.TestCase):
         subprocess.run(["glib-compile-schemas", str(old)], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         src = Gio.SettingsSchemaSource.new_from_directory(str(old), None, False)
-        gest = touchpad.GestureSettings(source=src)
+        gest = touchpad.GestureSettings(source=src, backend=kf_backend())
         self.assertTrue(gest.available)
         self.assertIsNone(gest.hides_night_light())
         self.assertFalse(gest.set_hides_night_light(True))
@@ -317,7 +334,7 @@ class GesturePageLabels(unittest.TestCase):
 class TouchpadKeys(unittest.TestCase):
     def setUp(self):
         reset_all()
-        self.pad = touchpad.TouchpadSettings()
+        self.pad = touchpad.TouchpadSettings(backend=kf_backend())
 
     def test_defaults_follow_the_schema(self):
         for key, getter in (("send-events", self.pad.send_events),

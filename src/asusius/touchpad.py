@@ -298,10 +298,11 @@ class TouchpadSettings:
     SchemaMissing then, and the page shows the reason instead of the rows."""
 
     def __init__(self, schema_id: str = TOUCHPAD_SCHEMA,
-                 source: Gio.SettingsSchemaSource | None = None) -> None:
+                 source: Gio.SettingsSchemaSource | None = None,
+                 backend: Gio.SettingsBackend | None = None) -> None:
         self.schema_id = schema_id
         self._schema = _open(schema_id, source)
-        self.settings = Gio.Settings.new_full(self._schema, None, None)
+        self.settings = Gio.Settings.new_full(self._schema, backend, None)
 
     def _nicks(self, key: str, fallback: tuple[str, ...]) -> tuple[str, ...]:
         """The values the schema allows for one of its enum keys."""
@@ -364,7 +365,8 @@ class GestureSettings:
     methods raise SchemaMissing when it is not."""
 
     def __init__(self, schema_id: str = EXTENSION_SCHEMA,
-                 source: Gio.SettingsSchemaSource | None = None) -> None:
+                 source: Gio.SettingsSchemaSource | None = None,
+                 backend: Gio.SettingsBackend | None = None) -> None:
         self.schema_id = schema_id
         if source is not None:
             schema = schema_lookup(schema_id, source)
@@ -374,7 +376,7 @@ class GestureSettings:
                       (schema_lookup(schema_id, chained) if chained else None))
         self._schema = schema
         self.available = schema is not None
-        self.settings = Gio.Settings.new_full(schema, None, None) if schema else None
+        self.settings = Gio.Settings.new_full(schema, backend, None) if schema else None
 
     def _require(self) -> Gio.Settings:
         if self.settings is None:
