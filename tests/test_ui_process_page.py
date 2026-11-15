@@ -416,7 +416,22 @@ class DialogMeasure(unittest.TestCase):
 
 
 class Expansion(unittest.TestCase):
-    def test_sections_expanded_by_default_and_kept_across_rebuilds(self):
+    def test_real_page_opens_apps_and_expands_the_full_list_on_request(self):
+        page = ProcessesPage(Mock())
+        page.hub = SimpleNamespace(procs=web_procs(), procs_gen=1)
+        page._aligned = True
+        page._rebuild()
+        self.assertTrue(tree_row(page, SECTION_APPS).get_expanded())
+        section = tree_row(page, SECTION_PROCS)
+        self.assertFalse(section.get_expanded())
+        section.set_expanded(True)
+        page._rebuild()
+        self.assertCountEqual([r.pid for r in tree_items(page) if r.kind == "proc"],
+                              [2, 10, 11, 20])
+        select(page, 20)
+        self.assertTrue(page.details_btn.get_sensitive())
+
+    def test_expanded_sections_are_kept_across_rebuilds(self):
         p = fake_page(web_procs())
         ProcessesPage._rebuild(p)
         keys = [i.key for i in tree_items(p)]

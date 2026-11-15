@@ -504,7 +504,8 @@ class ProcessesPage(MonitorPage):
         self._gen = -1
         self._order: list = []
         self._sec_kids = {SECTION_APPS: [], SECTION_PROCS: []}
-        self._expanded = {SECTION_APPS: True, SECTION_PROCS: True}  # per section key
+        # Apps is the landing view. Expanding the full list realizes its GTK rows.
+        self._expanded = {SECTION_APPS: True, SECTION_PROCS: False}
         self._shown = False
         self._rebuilding = False
         self._insp = None
