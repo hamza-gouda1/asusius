@@ -36,7 +36,7 @@ from ..tasks import run_bg
 from ..viewmodels import (OWN_APP_ID, OWN_APP_KEYS, desktop_index, norm_app_key,
                           signal_refusal)
 from ..widgets import label
-from .base import value_row
+from .base import a11y_name, value_row
 from .monitor_base import MonitorPage, set_text
 
 COLUMNS = [  # key, title, width chars, tooltip
@@ -438,13 +438,14 @@ class ProcessesPage(MonitorPage):
         bar.append(self.search)
         self.details_btn = Gtk.Button(label="Details", sensitive=False,
                                       tooltip_text="Inspect the selected process")
+        a11y_name(self.details_btn, "Process details")
         self.details_btn.connect("clicked", lambda *_: self.open_inspector())
         bar.append(self.details_btn)
         outer.append(bar)
-        self.end_btn = Gtk.Button(label="Stop", sensitive=False,
+        self.end_btn = Gtk.Button(label="Stop", sensitive=False, valign=Gtk.Align.CENTER,
                                   tooltip_text="Ask the selected app or process to quit (SIGTERM)")
         self.end_btn.connect("clicked", lambda *_: self._end_task(signal.SIGTERM))
-        self.kill_btn = Gtk.Button(label="Force Stop", sensitive=False,
+        self.kill_btn = Gtk.Button(label="Force Stop", sensitive=False, valign=Gtk.Align.CENTER,
                                    tooltip_text="Kill the selected app or process (SIGKILL)")
         self.kill_btn.add_css_class("destructive-action")
         self.kill_btn.connect("clicked", lambda *_: self._end_task(signal.SIGKILL))
@@ -517,8 +518,16 @@ class ProcessesPage(MonitorPage):
         """Fewer columns as the window narrows (Drive, Swap and GPU memory up to
         900 sp; PID and GPU too up to 460 sp) so the table never needs a horizontal
         scrollbar."""
+        narrow = level >= 3
+        self.collapse_btn.set_label("Collapse" if narrow else "Collapse All")
+        self.search.set_placeholder_text("Filter processes" if narrow
+                                         else "Filter by name, command or PID")
+        if narrow:
+            self.details_btn.set_icon_name("dialog-information-symbolic")
+        else:
+            self.details_btn.set_label("Details")
         hide = ({"disk", "vram", "swap"} if level >= 1 else set()) | (
-            {"pid", "gpu"} if level >= 3 else set())
+            {"pid", "gpu"} if narrow else set())
         for key, col in self.cols.items():
             col.set_visible(key not in hide)
 
