@@ -224,6 +224,8 @@ class MainWindow(Adw.ApplicationWindow):
             self.responsive(page.fit_columns)
         elif key in ("battery", "dgpu", "igpu"):
             self.responsive(page.fit_width)
+        elif key in ("fanmon", "network"):
+            self.responsive(page.fit_header)
         elif key == "fans":
             self.responsive(page.fit_width)
             if self.profile is not None:

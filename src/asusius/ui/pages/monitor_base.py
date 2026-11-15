@@ -58,7 +58,14 @@ class MonitorPage(Page):
         pills = Gtk.Box(spacing=6, valign=Gtk.Align.CENTER)
         box.append(pills)
         self.body.append(box)
+        self._heading = box
         return t, s, pills
+
+    def fit_header(self, level: int) -> None:
+        self._heading.set_orientation(Gtk.Orientation.VERTICAL if level >= 2
+                                      else Gtk.Orientation.HORIZONTAL)
+        pills = self._heading.get_last_child()
+        pills.set_halign(Gtk.Align.START if level >= 2 else Gtk.Align.END)
 
     def chart(self, lines: list[Line], **kw) -> Chart:
         kw["height"] = int(kw.get("height", 120) * 1.3)  # roomier than the first cut

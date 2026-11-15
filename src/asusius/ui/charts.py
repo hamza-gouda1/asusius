@@ -230,14 +230,13 @@ class Chart(Gtk.DrawingArea):
         ty = gt + ph + (2 if self.compact else 5)
         marks = ((0.0, 0.5, 1.0) if self.compact else (0.0, 0.25, 0.5, 0.75, 1.0))
         label_marks = marks
-        if self.monitor and not self.compact:
-            layout.set_text(f"−{int(self.window_s)} s", -1)
-            label_w = layout.get_pixel_size()[0]
-            gap = 1.5 * label_w + 8  # left-aligned endpoint beside a centred label
-            if pw / 2 < gap:
-                label_marks = (0.0, 1.0)
-            elif pw / 4 < gap:
-                label_marks = (0.0, 0.5, 1.0)
+        layout.set_text(f"−{int(self.window_s)} s", -1)
+        label_w = layout.get_pixel_size()[0]
+        gap = 1.5 * label_w + 8  # left-aligned endpoint beside a centred label
+        if pw / 2 < gap:
+            label_marks = (0.0, 1.0)
+        elif pw / 4 < gap:
+            label_marks = (0.0, 0.5, 1.0)
         for frac in marks:
             lab = "now" if frac == 1.0 else f"−{int(self.window_s * (1 - frac))} s"
             x = gl + frac * pw
