@@ -527,8 +527,18 @@ def inner(args) -> int:
                 row = pp.tree.get_row(0)
                 if row is not None:
                     row.set_expanded(True)
-                    pp.sel.set_selected(1)
-                yield 300
+                    grp = pp.tree.get_row(1)
+                    if grp is not None:
+                        grp.set_expanded(True)
+                        pp.sel.set_selected(2)
+                    yield 300
+                    pp.open_inspector()
+                    yield 400
+                    render(win.get_content(),
+                           out / f"processes-inspector-{scheme}{suffix}.png")
+                    if getattr(pp, "_insp", None) is not None:
+                        pp._insp.close()
+                    yield 300
             if key == "fans":
                 c = win.pages["fans"].canvas
                 c.active = 4

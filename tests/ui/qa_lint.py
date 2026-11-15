@@ -532,10 +532,23 @@ def child(job: dict) -> int:
                                      "lost GPU recovery guidance missing without NVML"))
                 if key == "processes":
                     pp = win.pages["processes"]
-                    row = pp.tree.get_row(0)
+                    row = pp.tree.get_row(0)  # Apps section row
                     if row is not None:
                         row.set_expanded(True)
-                        pp.sel.set_selected(1)
+                        grp = pp.tree.get_row(1)  # first app group
+                        if grp is not None:
+                            grp.set_expanded(True)
+                            pp.sel.set_selected(2)  # its first process
+                        yield 200
+                        if os.environ.get("ASUSIUS_QA_NO_INSPECTOR"):
+                            yield 300
+                        else:
+                            pp.open_inspector()
+                            yield 400
+                            save_shot(frame(), f"inspector-{name}.png")
+                            if getattr(pp, "_insp", None) is not None:
+                                pp._insp.close()
+                            yield 300
                     yield 300
                 if key == "fans":
                     c = win.pages["fans"].canvas

@@ -11,6 +11,7 @@ contrast is too low. Focus order and focus-ring checks are in `focus_order` / `f
 """
 from __future__ import annotations
 
+import os
 import re
 
 import gi
@@ -419,7 +420,26 @@ class Auditor:
         """`png` is a PIL image of the whole window (1 px = 1 logical px)."""
         W, H = png.size
         occluders = toast_rects(self.win, self.win)
+
+        def list_top(w):
+            """Top edge of the drawn row area of the enclosing GtkColumnView, in window
+            coordinates; None when the label is not inside a column view. The recycler
+            parks unused rows overlapping the header band, so text there would be
+            sampled from the header or the gap, not from a drawn row."""
+            p = w.get_parent()
+            while p is not None and p.__gtype__.name != "GtkColumnView":
+                p = p.get_parent()
+            if p is None:
+                return None
+            rects = [rect_in(c, self.win) for c in children(p)
+                     if "list" in c.__gtype__.name.lower()]
+            tops = [rc[1] for rc in rects if rc is not None]
+            return min(tops) if tops else None
+
         for lab, r, vp in labels:
+            lt = list_top(lab)
+            if lt is not None and r[1] < lt - 1:
+                continue  # a recycled row parked over the header band: not drawn here
             if any(overlap_area(r, box) > 0 for box in occluders):
                 continue  # this label is hidden by the transient toast surface
             if has_toast(lab):
@@ -460,6 +480,10 @@ class Auditor:
             need = required_ratio(size_px, bold)
             if ratio < need - 0.05:
                 sev = "fail" if ratio < need - 0.5 else "warn"
+                if os.environ.get("ASUSIUS_QA_DEBUG_CONTRAST"):
+                    with open("/tmp/m3-contrast-dbg.txt", "a") as dbg:
+                        dbg.write(f"{lab.get_text()[:24]!r} rect={r} vp={vp} "
+                                  f"fg={fg} bg={bg} ratio={ratio:.2f}\n")
                 self.f("contrast", sev, scope, lab,
                        f"{ratio:.2f}:1 (needs {need}:1) fg #{fg[0]:02x}{fg[1]:02x}{fg[2]:02x} "
                        f"on #{bg[0]:02x}{bg[1]:02x}{bg[2]:02x} [{chain(lab)}]")
