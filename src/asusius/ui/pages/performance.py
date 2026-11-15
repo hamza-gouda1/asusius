@@ -2,7 +2,7 @@
 # Copyright (C) Hamza Gouda
 from __future__ import annotations
 
-from gi.repository import Adw, GLib, Gtk
+from gi.repository import Adw, GLib, Gtk, Pango
 
 from ...core import Profile
 from ..tasks import run_bg
@@ -84,20 +84,22 @@ class PerformancePage(Page):
         g1 = Adw.PreferencesGroup(title="Profile",
                                   description="Sets fan behaviour and firmware power targets.")
         g1.add(self.cards)
-        live_strip = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=False,
-                                 min_children_per_line=1, max_children_per_line=3,
-                                 column_spacing=8, row_spacing=6, margin_top=10,
-                                 halign=Gtk.Align.START)
-        self.live_temp_pill = label("", ("live-pill", "numeric"))
-        self.live_power_pill = label("", ("live-pill", "numeric"))
-        self.live_gov_pill = label("", ("live-pill",))
+        # The FlowBox must wrap at the same width it used to request its height.
+        self.live_strip = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=False,
+                                      min_children_per_line=1, max_children_per_line=3,
+                                      column_spacing=8, row_spacing=6, margin_top=10,
+                                      visible=False)
+        self.live_temp_pill = label("", ("live-pill", "numeric"), halign=Gtk.Align.START)
+        self.live_power_pill = label("", ("live-pill", "numeric"), halign=Gtk.Align.START)
+        self.live_gov_pill = label("", ("live-pill",), halign=Gtk.Align.START,
+                                   wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR)
         for p in (self.live_temp_pill, self.live_power_pill, self.live_gov_pill):
-            live_strip.append(p)
+            self.live_strip.append(p)
             ch = p.get_parent()
             if ch is not None:
                 ch.set_focusable(False)
                 ch.set_visible(False)
-        g1.add(live_strip)
+        g1.add(self.live_strip)
         self.limits = Adw.PreferencesGroup(title="Power limits")
         self.limit_rows: list = []
         self.scales: dict[str, tuple] = {}
@@ -130,26 +132,24 @@ class PerformancePage(Page):
         self._sync_live_chips(t)
 
     @staticmethod
-    def _show_pill(pill_label: Gtk.Label, text: str) -> None:
-        pill_label.set_label(text)
-        pill_label.set_visible(True)
-        ch = pill_label.get_parent()
-        if ch is not None:
-            ch.set_visible(True)
+    def _set_pill(pill: Gtk.Label, text: str) -> None:
+        if text != pill.get_label():
+            pill.set_label(text)
+        pill.get_parent().set_visible(bool(text))
 
     def _sync_live_chips(self, t=None) -> None:
         if t is None:
             t = self.win.telemetry()
-        if t.cpu_temp_c is not None:
-            self._show_pill(self.live_temp_pill, f"CPU {fmt_temp(t.cpu_temp_c)}")
-        if t.cpu_power_w is not None:
-            self._show_pill(self.live_power_pill, f"Package {fmt_num(t.cpu_power_w, 1)} W")
         try:
             gov = self.win.hub.sampler.cpu.policy(include_groups=False).get("governor")
         except Exception:
             gov = None
-        if gov:
-            self._show_pill(self.live_gov_pill, f"Governor: {gov}")
+        temp = f"CPU {fmt_temp(t.cpu_temp_c)}" if t.cpu_temp_c is not None else ""
+        power = f"Package {fmt_num(t.cpu_power_w, 1)} W" if t.cpu_power_w is not None else ""
+        self._set_pill(self.live_temp_pill, temp)
+        self._set_pill(self.live_power_pill, power)
+        self._set_pill(self.live_gov_pill, f"CPU governor · {gov}" if gov else "")
+        self.live_strip.set_visible(bool(temp or power or gov))
 
     def _show_limits(self, lims) -> None:
         self._clear_limits()
@@ -157,17 +157,14 @@ class PerformancePage(Page):
         if not view.available:
             self.limits.set_description(None)
             exp = Adw.ExpanderRow(
-                title="Why aren't power limits shown?",
-                subtitle="Firmware did not expose writable min/max bounds")
+                title="Power limit controls unavailable",
+                subtitle="The system did not report readable values and safe bounds.")
             exp.add_prefix(Gtk.Image.new_from_icon_name("security-high-symbolic"))
             exp.set_tooltip_text(view.reason or None)
             retry = button("Retry", "flat", on_click=self.refresh)
             retry.set_valign(Gtk.Align.CENTER)
             exp.add_suffix(retry)
-            detail = Adw.ActionRow(
-                subtitle="Asusius only exposes power sliders when the kernel and firmware "
-                         "provide verified safe limits, rather than guessing values. "
-                         "If asusd was just started, click Retry.")
+            detail = Adw.ActionRow(subtitle=view.reason, use_markup=False)
             detail.set_subtitle_lines(0)
             exp.add_row(detail)
             self.limits.add(exp)

@@ -543,6 +543,15 @@ def child(job: dict) -> int:
                     win.pages["fans"]._changed()
                     c.queue_draw()
                     yield 200
+                if key == "performance":
+                    limits_ok, limits = page.limits.compute_bounds(page)
+                    for pill in (page.live_temp_pill, page.live_power_pill, page.live_gov_pill):
+                        if not pill.get_mapped():
+                            continue
+                        pill_ok, bounds = pill.compute_bounds(page)
+                        if limits_ok and pill_ok and bounds.get_y() + bounds.get_height() > limits.get_y():
+                            emit(Finding("overlap", "fail", key, "live readings and Power limits",
+                                         f"{pill.get_label()} extends into the next section"))
                 if key == "storage" and not real and mode == "":
                     page.scan_btn.emit("clicked")
                     for _ in range(50):
