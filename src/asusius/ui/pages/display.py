@@ -7,7 +7,7 @@ from gi.repository import Adw, GLib, Gtk
 from ..display_config import make_display_config
 from ..tasks import run_bg
 from ..viewmodels import parse_display_state
-from .base import Page, info_row, prefs_page, value_row
+from .base import ControlRow, Page, info_row, prefs_page, value_row
 
 
 class DisplayPage(Page):
@@ -22,11 +22,10 @@ class DisplayPage(Page):
 
         self.panel = Adw.PreferencesGroup(title="Built-in display")
         self.res_row, self.res_val = value_row("Resolution")
-        self.rate_row = Adw.ActionRow(title="Refresh rate",
-                                      subtitle="Higher is smoother, lower saves battery")
         self.rate_box = Gtk.Box(valign=Gtk.Align.CENTER)
         self.rate_box.add_css_class("linked")
-        self.rate_row.add_suffix(self.rate_box)
+        self.rate_row = ControlRow("Refresh rate", "Higher is smoother, lower saves battery",
+                                   self.rate_box)
         self.overdrive = Adw.SwitchRow(title="Panel overdrive",
                                        subtitle="Faster pixel response, less motion blur")
         self.overdrive.connect("notify::active", self._overdrive)
@@ -45,6 +44,9 @@ class DisplayPage(Page):
             "preferences-desktop-display-symbolic")
         self.vrr.add(self.vrr_row)
         self.set_child(prefs_page(self.panel, self.vrr))
+
+    def fit_width(self, level: int) -> None:
+        self.rate_row.fit_width(level)
 
     def refresh(self) -> None:
         self.dc.get_state(self._got_state, self._state_failed)

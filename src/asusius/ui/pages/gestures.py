@@ -9,7 +9,7 @@ from gi.repository import Adw, GLib, Gio, Gtk
 from ... import touchpad
 from ..tasks import run_bg
 from ..widgets import label
-from .base import Page, a11y_name, button, info_row, prefs_page, value_row
+from .base import ControlRow, Page, a11y_name, button, info_row, prefs_page, value_row
 
 ACTION_LABELS = {
     "none": "None",
@@ -258,14 +258,13 @@ class GesturesPage(Page):
                 self.speed_scale.remove_controller(controller)
         a11y_name(self.speed_scale, "Touchpad speed")
         self.speed_adj.connect("value-changed", self._speed)
-        self.speed_row = Adw.ActionRow(title="Speed",
-                                       subtitle="How far the cursor moves for a finger")
         self.speed_val = label("–", ("numeric", "dim-label"), xalign=1.0)
         self.speed_val.set_valign(Gtk.Align.CENTER)
-        speed_box = Gtk.Box(spacing=12, valign=Gtk.Align.CENTER)
+        speed_box = Gtk.Box(spacing=12, valign=Gtk.Align.CENTER, width_request=176)
         speed_box.append(self.speed_val)
         speed_box.append(self.speed_scale)
-        self.speed_row.add_suffix(speed_box)
+        self.speed_row = ControlRow("Speed", "How far the cursor moves for a finger",
+                                    speed_box, expand_control=True)
         self.click_row = Adw.ComboRow(title="Click method",
                                       subtitle="What a press in the button area does")
         self.click_row.connect("notify::selected", self._click)
@@ -332,6 +331,9 @@ class GesturesPage(Page):
         self.set_child(prefs_page(self.panel, self.gestures, self.qs_group))
 
     # -- lifecycle & layout helpers ------------------------------------------------------
+    def fit_width(self, level: int) -> None:
+        self.speed_row.fit_width(level)
+
     def on_hidden(self) -> None:
         if self._pending:
             GLib.source_remove(self._pending)

@@ -2,7 +2,7 @@
 # Copyright (C) Hamza Gouda
 from __future__ import annotations
 
-from gi.repository import Adw, Gtk
+from gi.repository import Adw, Gtk, Pango
 
 from ..widgets import label
 
@@ -77,6 +77,33 @@ def value_row(title: str, subtitle: str = "",
     val.add_css_class("dim-label")
     row.add_suffix(val)
     return row, val
+
+
+class ControlRow(Adw.PreferencesRow):
+    """A title and control that stack when the preferences page is narrow."""
+
+    def __init__(self, title: str, subtitle: str, control: Gtk.Widget,
+                 *, expand_control: bool = False) -> None:
+        super().__init__(title=title, activatable=False)
+        self.control = control
+        self.expand_control = expand_control
+        self.body = Gtk.Box(spacing=12, margin_start=12, margin_end=12,
+                            margin_top=10, margin_bottom=10)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2, hexpand=True,
+                       valign=Gtk.Align.CENTER)
+        wrap = {"wrap": True, "wrap_mode": Pango.WrapMode.WORD_CHAR}
+        text.append(label(title, ("title",), **wrap))
+        text.append(label(subtitle, ("subtitle", "caption"), **wrap))
+        self.body.append(text)
+        self.body.append(control)
+        self.set_child(self.body)
+
+    def fit_width(self, level: int) -> None:
+        stacked = level >= 2
+        self.body.set_orientation(Gtk.Orientation.VERTICAL if stacked
+                                  else Gtk.Orientation.HORIZONTAL)
+        self.control.set_halign(Gtk.Align.FILL if stacked and self.expand_control
+                                else Gtk.Align.START if stacked else Gtk.Align.END)
 
 
 def pill(text: str, *css: str) -> Gtk.Label:
