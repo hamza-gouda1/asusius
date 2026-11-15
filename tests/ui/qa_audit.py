@@ -430,8 +430,13 @@ class Auditor:
                 if (r[1] < vp[1] - 1 or r[1] + r[3] > vp[1] + vp[3] + 1
                         or r[0] < vp[0] - 1 or r[0] + r[2] > vp[0] + vp[2] + 1):
                     continue
-            if r[0] < -1 or r[1] < -1 or r[0] + r[2] > W + 1 or r[1] + r[3] > H + 1:
-                continue  # partly off the window: reported by the geometry checks
+            if r[0] < -1e-6 or r[1] < -1e-6 or r[0] + r[2] > W + 1e-6 \
+                    or r[1] + r[3] > H + 1e-6:
+                # fully-off or clipped labels only: a label whose rect is 1 px past
+                # the window edge sits under the opaque header bar at a scrolled
+                # position, so the crop would sample the bar's pixels, not the text
+                # (the geometry checks already report clipped labels)
+                continue
             x0, y0 = max(0, int(r[0])), max(0, int(r[1]))
             x1, y1 = min(W, int(r[0] + r[2])), min(H, int(r[1] + r[3]))
             if x1 - x0 < 3 or y1 - y0 < 3:

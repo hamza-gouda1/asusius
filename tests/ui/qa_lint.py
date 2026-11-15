@@ -543,6 +543,29 @@ def child(job: dict) -> int:
                     win.pages["fans"]._changed()
                     c.queue_draw()
                     yield 200
+                if key == "storage" and not real and mode == "":
+                    page.scan_btn.emit("clicked")
+                    for _ in range(50):
+                        if not page._scanning:
+                            break
+                        yield 100
+                    result = page._result
+                    if result is None or result.error or not result.totals["files"]:
+                        emit(Finding("disk-scan", "fail", key, "analyzer",
+                                     "the fake scan did not produce a populated analyzer"))
+                    else:
+                        page.units_app.set_active(True)
+                        page.mode_rings.set_active(True)
+                        if page._metric(result.node(result.root)) != result.totals["apparent"]:
+                            emit(Finding("disk-scan", "fail", key, "size mode",
+                                         "the apparent size toggle did not update the active metric"))
+                        children = result.children(result.root)
+                        if children:
+                            page.dmap.drill(children[0])
+                            if page._view_idx != children[0] or not page.dmap.up():
+                                emit(Finding("disk-scan", "fail", key, "drill and back",
+                                             "the chart and folder list did not navigate together"))
+                        yield 250
                 qa.check_min_width(emit, win, key, w, h, page)
                 img = frame()
                 if not real and (job.get("keep_shots") or (
@@ -769,17 +792,30 @@ def child(job: dict) -> int:
             yield 300
 
     def dialogs(win, aud, frame, tick):
-        # fan curve apply
-        win.show_page("fans")
-        yield 500
-        fans = win.pages["fans"]
-        fans.models["CPU"].drag(4, 64, 170)
-        fans._changed()
-        fans._apply()
-        yield from dialog_pass(win, aud, "dialog:fans-apply")
-        # factory reset (destructive)
-        fans._reset()
-        yield from dialog_pass(win, aud, "dialog:fans-reset")
+        if not job["pages"] or "fans" in job["pages"].split(","):
+            # The fake sysfs driver exposes only the currently active profile.
+            win.show_page("fans")
+            yield 500
+            fans = win.pages["fans"]
+            fans.models.clear()
+            fans.profile = win.ctl.get_profile()[0]
+            fans.refresh()
+            for _ in range(20):
+                if fans.models:
+                    break
+                yield 500
+            model = fans.models.get("CPU")
+            if model is None:
+                emit(Finding("fan-fixture", "fail", "fans", "curve dialogs",
+                             "the fake CPU fan curve data did not load"))
+            else:
+                model.drag(4, 64, 170)
+                fans._changed()
+                fans._apply()
+                yield from dialog_pass(win, aud, "dialog:fans-apply")
+                # factory reset (destructive)
+                fans._reset()
+                yield from dialog_pass(win, aud, "dialog:fans-reset")
         # GPU switch + banner
         from asusius.core import GpuMode
         win.show_page("gpu")
