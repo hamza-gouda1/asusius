@@ -1,24 +1,42 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) Hamza Gouda
-"""Processes and apps: a virtualised Gtk.ColumnView over a reusable row model.
+"""Processes and apps: one tree of two collapsible sections over a Gtk.ColumnView.
 
 The walk runs only while this page is visible (every 2 s, on the sampler's tick).
-Rows are plain GObjects reused between passes; only rows on screen have widgets
-(ColumnView recycles them), and cell text is pushed straight into the bound labels.
-Sorting and grouping are done in Python, not with GTK sorters, to keep it cheap.
+The tree holds two section rows — "Apps" (app groups, each expandable to its
+processes, with a "System processes" pseudo-group last) and "Processes" (every
+listed process flat) — pinned on top, sorted within. Rows are plain GObjects
+reused between passes; each store gets its own Row instances (a Row caches one
+widget per column, so sharing one instance across two stores would show stale
+cells), and only rows on screen have widgets. Sorting and grouping are done in
+Python, not with GTK sorters, to keep it cheap.
+
+The Details dialog inspects one (pid, start) identity: a snapshot via
+inspect_process on open, then one re-inspection every 2 s while the dialog is
+open and the page is shown. Inspection reads through the hub's root — the fake
+tree in fake mode, read-only — while the hub.fake guard stays on the dialog's
+write actions (Stop / Force Stop, priority Apply). Results are delivered only
+when the token (bumped on close, selection change and page-hide), the identity
+and the page all still match; once the identity is reported lost the dialog
+freezes for good. The dialog never renders the argument vector — only argv0 and
+how many arguments there are, with an explicit Copy action putting the command
+line on the clipboard.
 """
 from __future__ import annotations
 
 import os
+import shlex
 import signal
 
-from gi.repository import Gio, GLib, GObject, Gtk, Pango
+from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango
 
 from ...telemetry import fmt
-from ...telemetry.procs import alive, kill
+from ...telemetry.procs import alive, inspect_process, kill, set_priority
+from ..tasks import run_bg
+from ..viewmodels import (OWN_APP_ID, OWN_APP_KEYS, desktop_index, norm_app_key,
+                          signal_refusal)
 from ..widgets import label
-from ..viewmodels import (OWN_APP_ID, OWN_APP_KEYS, column_totals, desktop_index,
-                          norm_app_key, signal_refusal)
+from .base import value_row
 from .monitor_base import MonitorPage, set_text
 
 COLUMNS = [  # key, title, width chars, tooltip
@@ -42,6 +60,36 @@ SORT_KEYS = {
     "vram": lambda r: r.vram or 0,
 }
 
+INSPECT_MS = 2000  # one inspect_process per 2 s while the Details dialog is open
+SECTION_APPS = "__section_apps__"
+SECTION_PROCS = "__section_procs__"
+SYSTEM_KEY = "__system__"
+EXITED_TEXT = "The process has exited"
+CHANGED_TEXT = "The PID now belongs to a different process"
+
+# the inspector's (key, caption) rows; keys double as the vals dict used by tests
+INFO_ROWS = (("name", "Name"), ("pid", "PID"), ("ppid", "Parent PID"), ("user", "User"),
+             ("state", "State"), ("threads", "Threads"), ("uptime", "Uptime"),
+             ("nice", "Nice"), ("unit", "Unit"), ("cgroup", "Cgroup"))
+MEMORY_ROWS = (("rss", "Resident"), ("hwm", "Peak"), ("private", "Private"),
+               ("shared", "Shared"), ("swap", "Swap"))
+VAL_MAX_CHARS = 26  # value labels cap their natural width so the dialog stays shrinkable
+_VAL_START_ELLIPSIZE = {"cgroup"}  # paths read tail-first: keep the leaf unit visible
+
+
+def _fit_val(lab: Gtk.Label, key: str) -> Gtk.Label:
+    """A dialog value label never demands its full text as a minimum: it ellipsizes
+    (paths at the start, so the leaf unit stays visible) and caps its natural width,
+    keeping the whole dialog measurable under its own 460 px (and shrinkable onto a
+    360 px bottom sheet). The full value stays on hover via the tooltip."""
+    lab.set_ellipsize(Pango.EllipsizeMode.START if key in _VAL_START_ELLIPSIZE
+                      else Pango.EllipsizeMode.END)
+    lab.set_max_width_chars(VAL_MAX_CHARS)
+    return lab
+
+_HAS_ADW_DIALOG = hasattr(Adw, "Dialog")  # GNOME 46 = Adw 1.4
+_DIALOG_BASE = Adw.Dialog if _HAS_ADW_DIALOG else Gtk.Dialog
+
 
 def _attach_header_tooltip(header) -> None:
     """Attach the explanatory column text to its visible title label."""
@@ -53,7 +101,31 @@ def _attach_header_tooltip(header) -> None:
             return
 
 
-SYSTEM_KEY = "__system__"
+def totals_for(procs) -> dict[str, str]:
+    """Header second lines: sums over the displayed process set.
+
+    One contribution per process — a process shown under an app and flat still
+    counts once, because the sums come from the process list, not the rows.
+    A column with no readable contributor shows a dash (never a fabricated
+    zero); memory is shown even at 0 B, and dash only for an empty set.
+    """
+    if not procs:
+        return {"cpu": fmt.DASH, "mem": fmt.DASH, "swap": fmt.DASH, "disk": fmt.DASH,
+                "gpu": fmt.DASH, "vram": fmt.DASH}
+    cpus = [p.cpu for p in procs if p.cpu is not None]
+    swaps = [p.swap for p in procs if p.swap is not None]
+    disks = [p for p in procs if p.io_read is not None or p.io_write is not None]
+    gpus = [p.gpu for p in procs if p.gpu is not None]
+    vrams = [p.vram for p in procs if p.vram is not None]
+    return {
+        "cpu": fmt.pct(sum(cpus), 1) if cpus else fmt.DASH,
+        "mem": fmt.bytes_(sum(p.mem or 0 for p in procs)),
+        "swap": fmt.bytes_(sum(swaps)) if swaps else fmt.DASH,
+        "disk": fmt.rate(sum((p.io_read or 0) + (p.io_write or 0) for p in disks))
+                if disks else fmt.DASH,
+        "gpu": fmt.pct(min(100.0, sum(gpus)), 0) if gpus else fmt.DASH,
+        "vram": fmt.bytes_(sum(vrams)) if vrams else fmt.DASH,
+    }
 
 
 def _ancestors(w):
@@ -113,6 +185,234 @@ class Row(GObject.Object):
         return ""
 
 
+class InspectorDialog(_DIALOG_BASE):
+    """Details for one (pid, start) identity, re-inspected every 2 s while open.
+
+    The page owns the refresh loop and the delivery guard; this dialog only
+    renders snapshots, routes Stop / Force Stop back through the page's confirm
+    path for the inspected identity, and never renders the argument vector.
+    """
+
+    def __init__(self, page: ProcessesPage, row: Row) -> None:
+        if _HAS_ADW_DIALOG:
+            super().__init__(content_width=460, content_height=640)
+        else:  # libadwaita older than 1.4: a plain dialog, transient for the window
+            super().__init__(modal=True)
+            self.set_transient_for(page.win)
+            self.set_default_size(460, 640)
+        self.page = page
+        self.pid, self.start = row.pid, row.start
+        self.detail = None
+        self.gone = False  # identity lost: the StatusPage stays, controls stay disabled
+        self.set_title(row.name or "Process details")
+
+        tv = Adw.ToolbarView()
+        tv.add_top_bar(Adw.HeaderBar())
+        self.stack = Gtk.Stack(vexpand=True,
+                               transition_type=Gtk.StackTransitionType.CROSSFADE)
+        tv.set_content(self.stack)
+
+        prefs = Adw.PreferencesPage()
+        self.main = prefs
+        self.stack.add_named(prefs, "main")
+        self.status = Adw.StatusPage()
+        self.stack.add_named(self.status, "status")
+
+        info = Adw.PreferencesGroup(title="Process")
+        self.vals: dict[str, Gtk.Label] = {}
+        for key, caption in INFO_ROWS:
+            grow, val = value_row(caption)
+            info.add(grow)
+            self.vals[key] = _fit_val(val, key)
+        prefs.add(info)
+
+        mem = Adw.PreferencesGroup(title="Memory")
+        for key, caption in MEMORY_ROWS:
+            grow, val = value_row(caption)
+            mem.add(grow)
+            self.vals[key] = _fit_val(val, key)
+        prefs.add(mem)
+
+        cmd = Adw.PreferencesGroup(title="Command")
+        self.cmd_row = Adw.ActionRow(title="Executable", use_markup=False)
+        self.copy_btn = Gtk.Button(label="Copy", sensitive=False, valign=Gtk.Align.CENTER,
+                                   tooltip_text="Put the full command line on the clipboard")
+        self.copy_btn.connect("clicked", self._copy)
+        self.cmd_row.add_suffix(self.copy_btn)
+        cmd.add(self.cmd_row)
+        self.args_row, args_val = value_row("Arguments", numeric=False)
+        self.vals["args"] = _fit_val(args_val, "args")
+        cmd.add(self.args_row)
+        prefs.add(cmd)
+
+        prio = Adw.PreferencesGroup(
+            title="Priority",
+            description="Nice value: lower runs sooner. Raising the priority "
+                        "(a lower value) may need privileges.")
+        self.spin = Adw.SpinRow.new_with_range(-20, 19, 1)
+        self.spin.set_title("Nice")
+        self.apply_btn = Gtk.Button(label="Apply", sensitive=False, valign=Gtk.Align.CENTER)
+        self.apply_btn.add_css_class("suggested-action")
+        self.apply_btn.connect("clicked", self._apply_priority)
+        self.spin.add_suffix(self.apply_btn)
+        prio.add(self.spin)
+        prefs.add(prio)
+
+        bottom = Gtk.Box(spacing=8, halign=Gtk.Align.END, margin_top=6, margin_bottom=6,
+                         margin_start=10, margin_end=10)
+        bottom.add_css_class("toolbar")
+        self.stop_btn = Gtk.Button(label="Stop",
+                                   tooltip_text="Ask this process to quit (SIGTERM)")
+        self.stop_btn.connect("clicked", lambda *_: self._stop(signal.SIGTERM))
+        self.force_btn = Gtk.Button(label="Force Stop",
+                                    tooltip_text="Kill this process (SIGKILL)")
+        self.force_btn.add_css_class("destructive-action")
+        self.force_btn.connect("clicked", lambda *_: self._stop(signal.SIGKILL))
+        bottom.append(self.stop_btn)
+        bottom.append(self.force_btn)
+        tv.add_bottom_bar(bottom)
+
+        if _HAS_ADW_DIALOG:
+            self.set_child(tv)
+            self.connect("closed", lambda *_: page._insp_closed(self))
+        else:
+            self.get_content_area().append(tv)
+            self.connect("close-request", self._fallback_close)
+
+        why = signal_refusal(self.pid, {os.getpid()})
+        self._set_stop_actions(False)
+        self.stop_btn.set_tooltip_text(why or "Ask this process to quit (SIGTERM)")
+        self.force_btn.set_tooltip_text(why or "Kill this process (SIGKILL)")
+
+    # -- snapshot -------------------------------------------------------------------------
+    def _set_val(self, key: str, text: str) -> None:
+        lab = self.vals[key]
+        set_text(lab, text)
+        lab.set_tooltip_text(text)  # values ellipsize: the full text stays on hover
+
+    def _mark_gone(self, status: str) -> None:
+        """Exited or replaced: replace the content with a StatusPage and freeze.
+
+        Once the identity is lost it stays lost for this dialog: every control
+        is disabled and nothing re-enables them, so a snapshot that slips through
+        after the fact can never make the dialog act on a dead identity.
+        """
+        self.gone = True
+        self.page._insp_stop_timer()
+        self.status.set_title(EXITED_TEXT if status == "exited" else CHANGED_TEXT)
+        self.stack.set_visible_child(self.status)
+        self._set_stop_actions(False)
+        self.apply_btn.set_sensitive(False)
+        self.spin.set_sensitive(False)
+        self.copy_btn.set_sensitive(False)
+
+    def got_detail(self, d) -> None:
+        """Apply one inspect_process snapshot (page-side guards already passed)."""
+        if self.gone:
+            return  # identity lost: keep the StatusPage and the controls disabled
+        previous = self.detail
+        self.detail = d
+        if d.status != "ok":
+            self._mark_gone(d.status)
+            return
+        self.stack.set_visible_child(self.main)
+        for key, text in {
+            "name": d.name or d.comm or "–",
+            "pid": str(d.pid),
+            "ppid": "–" if d.ppid is None else str(d.ppid),
+            "user": d.user or "–",
+            "state": d.state or "–",
+            "threads": "–" if d.threads is None else str(d.threads),
+            "uptime": fmt.duration(d.uptime_s),
+            "nice": fmt.num(d.nice),
+            "unit": d.unit or "–",
+            "cgroup": d.cgroup or "–",
+            "rss": fmt.bytes_(d.rss),
+            "hwm": fmt.bytes_(d.hwm),
+            "private": fmt.bytes_(d.private),
+            "shared": fmt.bytes_(d.shared),
+            "swap": fmt.bytes_(d.swap),
+        }.items():
+            self._set_val(key, text)
+        n = d.args_count
+        self._set_val("args", "–" if n is None else "No arguments" if n == 0 else
+                      "1 argument" if n == 1 else f"{n} arguments")
+        self.cmd_row.set_subtitle(d.argv0 or "–")
+        self.copy_btn.set_sensitive(bool(d.args or d.argv0))
+        controllable = d.uid == os.getuid() and signal_refusal(self.pid, {os.getpid()}) is None
+        if d.nice is None or not controllable:
+            self.spin.set_sensitive(False)
+            self.apply_btn.set_sensitive(False)
+        else:
+            self.spin.set_sensitive(True)
+            if (previous is None or previous.nice is None
+                    or self.spin.get_value() == previous.nice):
+                if self.spin.get_value() != d.nice:
+                    self.spin.set_value(float(d.nice))
+            self.apply_btn.set_sensitive(True)
+        self._set_stop_actions(controllable)
+
+    # -- command line ---------------------------------------------------------------------
+    @staticmethod
+    def _to_clipboard(text: str) -> None:
+        disp = Gdk.Display.get_default()
+        if disp is not None:
+            disp.get_clipboard().set_content(Gdk.ContentProvider.new_for_value(text))
+
+    def _copy(self, *_args) -> None:
+        d = self.detail
+        if self.gone or d is None or d.status != "ok":
+            return
+        line = shlex.join(d.args) if d.args else (d.argv0 or "")
+        if not line:
+            return
+        self._to_clipboard(line)
+        self.page.win.toast("Command line copied")
+
+    # -- priority -------------------------------------------------------------------------
+    def _apply_priority(self, *_args) -> None:
+        d = self.detail
+        if (self.gone or d is None or d.status != "ok" or d.nice is None or d.uid != os.getuid()
+                or signal_refusal(self.pid, {os.getpid()})):
+            return
+        page = self.page
+        if page.hub.fake:  # fake PIDs could belong to real processes: never touch the OS
+            page.win.toast("Fake hardware: priority not changed")
+            return
+        nice = int(self.spin.get_value())
+        token = page._insp_token
+        run_bg(set_priority, self.pid, self.start, nice,
+               done=lambda eff: page._insp_priority_done(token, self.pid, self.start, eff),
+               error=lambda exc: page._insp_priority_error(token, self.pid, self.start, exc))
+
+    def got_priority(self, eff: int) -> None:
+        self._set_val("nice", fmt.num(eff))
+        if self.detail is not None and self.detail.status == "ok":
+            self.detail.nice = eff
+        self.spin.set_sensitive(True)
+        if self.spin.get_value() != eff:
+            self.spin.set_value(float(eff))
+        self.apply_btn.set_sensitive(True)
+        self.page.win.toast(f"Priority set to {eff}")
+
+    # -- signals --------------------------------------------------------------------------
+    def _set_stop_actions(self, sensitive: bool) -> None:
+        self.stop_btn.set_sensitive(sensitive)
+        self.force_btn.set_sensitive(sensitive)
+
+    def _stop(self, sig: int) -> None:
+        d = self.detail
+        if self.gone or d is None or d.status != "ok" or d.uid != os.getuid():
+            return
+        what = f"{d.name or d.comm or 'the process'} (PID {self.pid})"
+        self.page._ask_signal(what, [(self.pid, self.start)], sig)
+
+    def _fallback_close(self, *_args) -> bool:
+        self.page._insp_closed(self)
+        self.destroy()
+        return True
+
+
 class ProcessesPage(MonitorPage):
     key, title = "processes", "Processes"
     rate_s = 1.0
@@ -124,24 +424,20 @@ class ProcessesPage(MonitorPage):
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10, margin_top=16,
                         margin_start=16, margin_end=16, margin_bottom=12)
         bar = Gtk.Box(spacing=8)
-        self.mode = {}
-        first = None
-        seg = Gtk.Box()
-        seg.add_css_class("linked")
-        for key, text in (("apps", "Apps"), ("all", "All processes")):
-            b = Gtk.ToggleButton(label=text)
-            if first:
-                b.set_group(first)
-            first = first or b
-            b.connect("toggled", self._mode_changed, key)
-            seg.append(b)
-            self.mode[key] = b
-        bar.append(seg)
+        self.collapse_btn = Gtk.Button(
+            label="Collapse All",
+            tooltip_text="Collapse both sections and every app group")
+        self.collapse_btn.connect("clicked", self._collapse_all)
+        bar.append(self.collapse_btn)
         self.search = Gtk.SearchEntry(placeholder_text="Filter by name, command or PID",
                                       hexpand=True,
                                       tooltip_text="Filter by name, command or PID")
         self.search.connect("search-changed", lambda *_: self._rebuild(force=True))
         bar.append(self.search)
+        self.details_btn = Gtk.Button(label="Details", sensitive=False,
+                                      tooltip_text="Inspect the selected process")
+        self.details_btn.connect("clicked", lambda *_: self.open_inspector())
+        bar.append(self.details_btn)
         outer.append(bar)
         self.end_btn = Gtk.Button(label="Stop", sensitive=False,
                                   tooltip_text="Ask the selected app or process to quit (SIGTERM)")
@@ -158,6 +454,14 @@ class ProcessesPage(MonitorPage):
         sum_row.append(self.kill_btn)
         outer.append(sum_row)
 
+        self.sections = {}
+        for key, title, tip in (
+                (SECTION_APPS, "Apps (0)", "Applications with the processes they started"),
+                (SECTION_PROCS, "Processes (0)", "Every running process, one per line")):
+            r = Row(key, "section")
+            r.name, r.cmd = title, tip
+            r.children = Gio.ListStore(item_type=Row)
+            self.sections[key] = r
         self.root_store = Gio.ListStore(item_type=Row)
         self.tree = Gtk.TreeListModel.new(self.root_store, False, False, self._children)
         self.sel = Gtk.SingleSelection(model=self.tree, autoselect=False, can_unselect=True)
@@ -187,21 +491,30 @@ class ProcessesPage(MonitorPage):
         outer.append(self.note)
         self.set_child(outer)
 
-        self.rows: dict = {}
+        self.rows: dict = {}  # apps section: group rows by app id, their children by (pid, start)
+        self.flat: dict = {}  # processes section: separate Row instances, reused per pass
         self.apps: dict[str, tuple[str, object] | None] = {}  # app id -> (name, gicon)
         self._dindex: dict | None = None
         self._dindex_busy = False
         self._quit_timer = 0
         self._aligned = False
-        self.view = "apps"
         self._gen = -1
         self._order: list = []
-        self.mode["apps"].set_active(True)
+        self._sec_kids = {SECTION_APPS: [], SECTION_PROCS: []}
+        self._expanded = {SECTION_APPS: True, SECTION_PROCS: True}  # per section key
+        self._shown = False
+        self._rebuilding = False
+        self._insp = None
+        self._insp_token = 0
+        self._insp_timer = 0
+        self._insp_pending: int | None = None
+        self._insp_target: tuple[int, int] | None = None
         cv.get_sorter().connect("changed", lambda *_: self._rebuild(force=True))
 
     def fit_columns(self, level: int) -> None:
-        """Fewer columns as the window narrows (Drive, Swap and GPU memory up to 900 sp; PID and GPU too
-        up to 460 sp) so the table never needs a horizontal scrollbar."""
+        """Fewer columns as the window narrows (Drive, Swap and GPU memory up to
+        900 sp; PID and GPU too up to 460 sp) so the table never needs a horizontal
+        scrollbar."""
         hide = ({"disk", "vram", "swap"} if level >= 1 else set()) | (
             {"pid", "gpu"} if level >= 3 else set())
         for key, col in self.cols.items():
@@ -209,18 +522,33 @@ class ProcessesPage(MonitorPage):
 
     # -- visibility --------------------------------------------------------------------
     def on_shown(self) -> None:
+        self._shown = True
         self._warm_desktop_index()
         self.hub.want_processes(True)
+        self._insp_resume()
         super().on_shown()
+
+    def _insp_resume(self) -> None:
+        """Re-arm the inspector loop after a page-hide (the dialog itself stays up)."""
+        if self._insp is not None and not self._insp.gone and not self._insp_timer:
+            self._insp_timer = GLib.timeout_add(INSPECT_MS, self._insp_tick)
 
     def on_hidden(self) -> None:
         """Release everything: the walk stops and the rows are dropped."""
         if self._quit_timer:
             GLib.source_remove(self._quit_timer)
             self._quit_timer = 0
+        if self._insp is not None:  # freeze the loop; the dialog itself stays up
+            self._insp_token += 1
+            self._insp_stop_timer()
+        self._shown = False
         self.hub.want_processes(False)
         self.root_store.remove_all()
+        for sec in self.sections.values():
+            sec.children.remove_all()
+        self._sec_kids = {SECTION_APPS: [], SECTION_PROCS: []}
         self.rows.clear()
+        self.flat.clear()
         self._order = []
         self._gen = -1
 
@@ -266,8 +594,9 @@ class ProcessesPage(MonitorPage):
         if row is not None:
             row.cells.pop(key, None)
 
-    def _children(self, item):
-        return item.children if item.kind == "app" else None
+    @staticmethod
+    def _children(item):
+        return item.children if item.kind in ("app", "section") else None
 
     # -- data ---------------------------------------------------------------------------
     def _app_info(self, app_id: str, launched: bool = True):
@@ -336,7 +665,6 @@ class ProcessesPage(MonitorPage):
                 if self.hub.procs:
                     self._rebuild(force=True)
 
-        from ..tasks import run_bg
         run_bg(build, done=done, error=lambda _e: setattr(self, "_dindex_busy", False))
 
     def _desktop_index(self) -> dict:
@@ -345,14 +673,6 @@ class ProcessesPage(MonitorPage):
             self._warm_desktop_index()
             return {}
         return self._dindex
-
-    def _mode_changed(self, b, key):
-        if b.get_active() and key != self.view:
-            self.view = key
-            self.root_store.remove_all()
-            self.rows.clear()
-            self._order = []
-            self._rebuild(force=True)
 
     def update(self) -> None:
         if self.hub.procs_gen != self._gen:
@@ -365,11 +685,14 @@ class ProcessesPage(MonitorPage):
         desc = sorter.get_primary_sort_order() == Gtk.SortType.DESCENDING
         return SORT_KEYS[key], desc
 
-    def _proc_row(self, p) -> Row:
+    def _proc_row(self, p, cache: dict) -> Row:
+        """One proc row out of the given store's reuse dict: the apps section keeps its
+        own instances in self.rows, the flat section separate ones in self.flat (a Row
+        caches its bound widgets, so one instance can never serve two stores)."""
         key = (p.pid, p.start)
-        r = self.rows.get(key)
+        r = cache.get(key)
         if r is None:
-            r = self.rows[key] = Row(key, "proc")
+            r = cache[key] = Row(key, "proc")
             r.pid, r.start, r.uid = p.pid, p.start, p.uid
             r.name = f"[{p.name}]" if p.kthread else p.name
             r.cmd = p.cmd
@@ -382,108 +705,95 @@ class ProcessesPage(MonitorPage):
     def _rebuild(self, force: bool = False) -> None:
         self._gen = self.hub.procs_gen
         procs = self.hub.procs
-        if not procs:
-            set_text(self.summary, "Reading processes…")
-            return
         q = self.search.get_text().strip().lower()
         keyf, desc = self._sort()
         by_pid = {p.pid: p for p in procs}
-        total_cpu = sum(p.cpu or 0 for p in procs)
-        live = set()
-        if self.view == "all":
-            rows = []
-            for p in procs:
-                if q and q not in p.name.lower() and q not in p.cmd.lower() \
-                        and q != str(p.pid):
-                    continue
-                r = self._proc_row(p)
-                live.add(r.key)
-                rows.append(r)
-            rows.sort(key=keyf, reverse=desc)
-            set_text(self.summary, f"{len(procs)} processes · "
-                     f"{sum(p.threads for p in procs)} threads · CPU {total_cpu:.1f} %")
-        else:
-            groups: dict[str, list] = {}
-            own_pid = os.getpid()
-            for p in procs:
-                app = p.app
-                hops, cur = 0, p
-                while (cur.pid != own_pid and app is None and hops < 8
-                       and cur.ppid in by_pid and cur.ppid > 1):
-                    cur = by_pid[cur.ppid]
-                    app = cur.app
-                    hops += 1
-                if cur.pid == own_pid:
-                    app = OWN_APP_ID
-                if app is None:
-                    continue
-                groups.setdefault(app, []).append(p)
-            rows = []
-            n_procs = 0
-            assigned: set[int] = set()
-            for app, members in groups.items():
-                info = self._app_info(app, any((m.unit or "").startswith("app-")
-                                               for m in members))
-                if info is None:
-                    continue
-                name = info[0]
-                if q and q not in name.lower() and q not in app.lower() and not any(
-                        q in m.name.lower() or q == str(m.pid) for m in members):
-                    continue
-                r = self.rows.get(app)
-                if r is None:
-                    r = self.rows[app] = Row(app, "app")
-                    r.name, r.icon = name, info[1]
-                    r.children = Gio.ListStore(item_type=Row)
-                    r.cmd = app
-                live.add(app)
-                n_procs += self._fill_group(r, members, keyf, desc, live)
-                assigned.update(m.pid for m in members)
-                rows.append(r)
-            rows.sort(key=keyf, reverse=desc)
-            others = [p for p in procs if p.pid not in assigned and not p.kthread and (
-                not q or q in p.name.lower() or q in p.cmd.lower() or q == str(p.pid))]
-            if others:  # everything that is not an app, in one group at the bottom
-                r = self.rows.get(SYSTEM_KEY)
-                if r is None:
-                    r = self.rows[SYSTEM_KEY] = Row(SYSTEM_KEY, "app")
-                    r.name, r.cmd = "System processes", "Services and background processes"
-                    r.children = Gio.ListStore(item_type=Row)
-                live.add(SYSTEM_KEY)
-                self._fill_group(r, others, keyf, desc, live)
-                r.count = len(others)
-                rows.append(r)
-            n_apps = len(rows) - (1 if others else 0)
-            set_text(self.summary, f"{n_apps} apps · {n_procs} of {len(procs)} processes · "
-                     f"CPU {total_cpu:.1f} %")
+        shown = [p for p in procs if not q or q in p.name.lower() or q in p.cmd.lower()
+                 or q == str(p.pid)]
+        # -- apps section: one group per application, the System pseudo-group last
+        groups: dict[str, list] = {}
+        own_pid = os.getpid()
+        for p in procs:
+            app = p.app
+            hops, cur = 0, p
+            while (cur.pid != own_pid and app is None and hops < 8
+                   and cur.ppid in by_pid and cur.ppid > 1):
+                cur = by_pid[cur.ppid]
+                app = cur.app
+                hops += 1
+            if cur.pid == own_pid:
+                app = OWN_APP_ID
+            if app is None:
+                continue
+            groups.setdefault(app, []).append(p)
+        app_rows: list[Row] = []
+        assigned: set[int] = set()
+        live: set = set()
+        for app, members in groups.items():
+            info = self._app_info(app, any((m.unit or "").startswith("app-")
+                                           for m in members))
+            if info is None:
+                continue
+            name = info[0]
+            if q and q not in name.lower() and q not in app.lower() and not any(
+                    q in m.name.lower() or q == str(m.pid) for m in members):
+                continue
+            r = self.rows.get(app)
+            if r is None:
+                r = self.rows[app] = Row(app, "app")
+                r.children = Gio.ListStore(item_type=Row)
+                r.cmd = app
+            r.name, r.icon = name, info[1]
+            live.add(app)
+            self._fill_group(r, members, keyf, desc, live)
+            assigned.update(m.pid for m in members)
+            app_rows.append(r)
+        app_rows.sort(key=keyf, reverse=desc)
+        others = [p for p in procs if p.pid not in assigned and not p.kthread and (
+            not q or q in p.name.lower() or q in p.cmd.lower() or q == str(p.pid))]
+        if others:  # everything that is not an app, in one group at the bottom
+            r = self.rows.get(SYSTEM_KEY)
+            if r is None:
+                r = self.rows[SYSTEM_KEY] = Row(SYSTEM_KEY, "app")
+                r.name, r.cmd = "System processes", "Services and background processes"
+                r.children = Gio.ListStore(item_type=Row)
+            live.add(SYSTEM_KEY)
+            self._fill_group(r, others, keyf, desc, live)
+            r.count = len(others)
+            app_rows.append(r)
+        # -- processes section: every listed process, flat
+        flat_rows = [self._proc_row(p, self.flat) for p in shown]
+        live_flat = {r.key for r in flat_rows}
+        flat_rows.sort(key=keyf, reverse=desc)
         for k in [k for k in self.rows if k not in live]:
             del self.rows[k]
-        if force or [id(r) for r in rows] != self._order:
-            self._splice(rows)
-        for r in self.rows.values():
-            for col, w in r.cells.items():
-                text = r.text(col)
-                if w.get_label() != text:
-                    w.set_label(text)
-        self._update_titles(total_cpu)
+        for k in [k for k in self.flat if k not in live_flat]:
+            del self.flat[k]
+        n_apps = len(app_rows) - (1 if others else 0)
+        self.sections[SECTION_APPS].name = f"Apps ({n_apps})"
+        self.sections[SECTION_PROCS].name = f"Processes ({len(shown)})"
+        cpu = sum(p.cpu or 0 for p in shown)
+        set_text(self.summary, (f"{n_apps} apps · {len(shown)} of {len(procs)} processes · "
+                               f"CPU {fmt.pct(cpu, 1)}") if procs else "Reading processes…")
+        self._rebuilding = True
+        try:
+            with self.sel.freeze_notify():
+                self._splice([self.sections[SECTION_APPS], self.sections[SECTION_PROCS]],
+                             {SECTION_APPS: app_rows, SECTION_PROCS: flat_rows}, force)
+        finally:
+            self._rebuilding = False
+        for cache in (self.rows, self.flat):
+            for r in cache.values():
+                for col, w in r.cells.items():
+                    text = r.text(col)
+                    if w.get_label() != text:
+                        w.set_label(text)
+        self._update_titles(shown)
 
-    def _update_titles(self, total_cpu: float) -> None:
-        """Column headers carry the machine-wide figure under the name, like Mission
-        Center ("CPU / 4%"): CPU, memory, swap, drive busy, GPU busy, VRAM used."""
-        st, info = self.hub.store, self.hub.info
-        mem = info.get("mem") or {}
-        tot = mem.get("total") or 0
-        memp = 100.0 * (tot - (mem.get("available") or 0)) / tot if tot else None
-        swp = 100.0 * (mem.get("swap_used") or 0) / mem["swap_total"] \
-            if mem.get("swap_total") else None
-        disks = (info.get("disk") or {}).get("disks") or {}
-        busy = [b for b in (st.last(f"disk.{n}.busy") for n in disks) if b is not None]
-        gpus = [g for g in (st.last("igpu.util"), st.last("dgpu.util")) if g is not None]
-        q = (info.get("dgpu") or {}).get("q") or {}
-        vram = 100.0 * q["vram_used"] / q["vram_total"] \
-            if q.get("vram_used") is not None and q.get("vram_total") else None
-        tots = column_totals(total_cpu, memp, swp, max(busy) if busy else None,
-                             max(gpus) if gpus else None, vram)
+    def _update_titles(self, procs) -> None:
+        """Column headers carry the displayed-set sums under the name (totals_for), like
+        Mission Center ("CPU / 4%"): CPU, memory, swap, drive, GPU busy, VRAM used."""
+        tots = totals_for(procs)
         for key, title, _c, _t in COLUMNS:
             want = f"{title}\n{tots[key]}" if tots.get(key) else title
             col = self.cols[key]
@@ -514,7 +824,7 @@ class ProcessesPage(MonitorPage):
 
     def _fill_group(self, r: Row, members, keyf, desc, live) -> int:
         """Sum a group's member processes into its row; returns how many there are."""
-        kids = [self._proc_row(m) for m in members]
+        kids = [self._proc_row(m, self.rows) for m in members]
         for k in kids:
             live.add(k.key)
         kids.sort(key=keyf, reverse=desc)
@@ -534,29 +844,72 @@ class ProcessesPage(MonitorPage):
             r.children.splice(0, r.children.get_n_items(), kids)
         return len(kids)
 
-    def _splice(self, rows: list[Row]) -> None:
+    # -- tree splicing --------------------------------------------------------------------
+    def _splice(self, rows: list[Row], kids_map: dict[str, list[Row]],
+                force: bool = False) -> None:
+        """Refresh the tree: two pinned section rows, their children sorted, expansion
+        and the selection kept across rebuilds and searches. Expansion is tracked per
+        key (sections and app groups), applied after every splice."""
         selected = self._selected_row()
-        expanded = set()
         for i in range(self.tree.get_n_items()):
             tr = self.tree.get_row(i)
-            if tr is not None and tr.get_expanded():
-                expanded.add(tr.get_item().key)
-        self.root_store.splice(0, self.root_store.get_n_items(), rows)
-        self._order = [id(r) for r in rows]
+            if tr is None:
+                continue
+            item = tr.get_item()
+            if item is not None and item.kind in ("app", "section"):
+                self._expanded[item.key] = tr.get_expanded()
+        if [id(r) for r in rows] != self._order:  # sections are pinned: rarely changes
+            self.root_store.splice(0, self.root_store.get_n_items(), rows)
+            self._order = [id(r) for r in rows]
+        for key, kids in kids_map.items():
+            if force or [id(k) for k in kids] != [id(k) for k in self._sec_kids[key]]:
+                self._sec_kids[key] = kids
+                store = self.sections[key].children
+                store.splice(0, store.get_n_items(), kids)
         i = 0
         while i < self.tree.get_n_items():
             tr = self.tree.get_row(i)
-            if tr is not None and tr.get_item().key in expanded and not tr.get_expanded():
-                tr.set_expanded(True)
             i += 1
+            if tr is None:
+                continue
+            item = tr.get_item()
+            if item is None or item.kind not in ("app", "section"):
+                continue
+            want = self._expanded.get(item.key)
+            if want is not None and tr.get_expanded() != want:
+                tr.set_expanded(want)
         if selected is not None:
+            hit = None
             for i in range(self.tree.get_n_items()):
                 tr = self.tree.get_row(i)
-                if tr is not None and tr.get_item().key == selected.key:
-                    self.sel.set_selected(i)
+                if tr is None:
+                    continue
+                item = tr.get_item()
+                if item is selected:
+                    hit = i
                     break
-            else:
-                self.sel.set_selected(Gtk.INVALID_LIST_POSITION)
+                if hit is None and item.key == selected.key:
+                    hit = i
+            self.sel.set_selected(hit if hit is not None else Gtk.INVALID_LIST_POSITION)
+
+    def _collapse_all(self, *_args) -> None:
+        """Collapse both sections and every app group — also the ones currently hidden
+        inside a collapsed section (self.rows knows them all) — so nothing comes back
+        expanded on a rebuild."""
+        self._expanded[SECTION_APPS] = False
+        self._expanded[SECTION_PROCS] = False
+        for key, r in self.rows.items():
+            if r.kind == "app":
+                self._expanded[key] = False
+        i = 0
+        while i < self.tree.get_n_items():
+            tr = self.tree.get_row(i)
+            i += 1
+            if tr is None:
+                continue
+            item = tr.get_item()
+            if item is not None and item.kind in ("app", "section") and tr.get_expanded():
+                tr.set_expanded(False)
 
     # -- end task -----------------------------------------------------------------------
     def _selected_row(self) -> Row | None:
@@ -564,12 +917,21 @@ class ProcessesPage(MonitorPage):
         return tr.get_item() if tr is not None else None
 
     def _selection_changed(self) -> None:
+        if self._insp is not None and not self._rebuilding:
+            dlg = self._insp
+            self._insp_closed(dlg)
+            dlg.close()
         r = self._selected_row()
-        mine = r is not None and r.uid == os.getuid() and self._refusal(r) is None
+        is_proc = r is not None and r.kind == "proc" and r.pid is not None
+        self.details_btn.set_sensitive(bool(is_proc))
+        mine = r is not None and r.kind in ("app", "proc") and r.uid == os.getuid() \
+            and self._refusal(r) is None
         for b in (self.end_btn, self.kill_btn):
             b.set_sensitive(bool(mine))
         why = None
-        if r is not None and not mine:
+        if r is None or r.kind == "section":
+            why = "Select an app or a process to stop it"
+        elif not mine:
             why = self._refusal(r) or "Owned by another user: stopping it needs root"
         self.end_btn.set_tooltip_text(why or "Ask the selected app or process to quit (SIGTERM)")
         self.kill_btn.set_tooltip_text(why or "Kill the selected app or process (SIGKILL)")
@@ -585,14 +947,10 @@ class ProcessesPage(MonitorPage):
     def _targets(self, r: Row) -> list[tuple[int, int]]:
         return [(p.pid, p.start) for p in r.procs if p.uid == os.getuid()]
 
-    def _end_task(self, sig=signal.SIGTERM) -> None:
-        r = self._selected_row()
-        if r is None or self._refusal(r):
+    def _ask_signal(self, what: str, targets, sig) -> None:
+        own = {os.getpid()}
+        if any(signal_refusal(pid, own) for pid, _start in targets):
             return
-        targets = self._targets(r)
-        if not targets:
-            return
-        what = r.name if r.kind == "app" else f"{r.name} (PID {r.pid})"
         n = len(targets)
         who = f"its {n} processes" if n > 1 else "it"
         if sig == signal.SIGKILL:
@@ -606,29 +964,46 @@ class ProcessesPage(MonitorPage):
                          "be lost.", "Stop", lambda: self._signal(what, targets, signal.SIGTERM),
                          destructive=True)
 
+    def _end_task(self, sig=signal.SIGTERM) -> None:
+        r = self._selected_row()
+        if r is None or r.kind == "section" or self._refusal(r):
+            return
+        targets = self._targets(r)
+        if not targets:
+            return
+        what = r.name if r.kind == "app" else f"{r.name} (PID {r.pid})"
+        self._ask_signal(what, targets, sig)
+
     def _signal(self, what: str, targets, sig) -> None:
         if self.hub.fake:  # fake PIDs could belong to real processes: never signal them
             self.win.toast(f"Fake hardware: {what} not signalled")
             return
         errors = []
+        sent = []
         for pid, start in targets:
             try:
                 kill(pid, start, sig)
             except ProcessLookupError:
                 pass
-            except PermissionError as exc:
-                errors.append(str(exc))
+            except OSError as exc:
+                errors.append(f"PID {pid} ({exc})")
+            else:
+                sent.append((pid, start))
         if errors:
-            self.win.toast(f"Could not end {what}: {errors[0]}")
-            return
-        if sig == signal.SIGKILL:
+            self.win.toast(f"Signalled {len(sent)} of {len(targets)} for {what}. "
+                           f"Failed: {errors[0]}")
+        elif not sent:
+            self.win.toast(f"{what} already exited")
+        elif sig == signal.SIGKILL:
             self.win.toast(f"{what} killed")
+        else:
+            self.win.toast(f"Asked {what} to quit")
+        if sig == signal.SIGKILL or not sent:
             return
-        self.win.toast(f"Asked {what} to quit")
 
         def check():
             self._quit_timer = 0
-            left = [(p, s) for p, s in targets if alive(p, s)]
+            left = [(p, s) for p, s in sent if alive(p, s)]
             if left:
                 self.win.confirm(f"{what} is still running",
                                  "It did not quit within 3 seconds. Force it to stop "
@@ -640,3 +1015,96 @@ class ProcessesPage(MonitorPage):
         if self._quit_timer:
             GLib.source_remove(self._quit_timer)
         self._quit_timer = GLib.timeout_add(3000, check)
+
+    # -- details inspector ----------------------------------------------------------------
+    def open_inspector(self) -> None:
+        """Open the Details dialog for the selected process row (QA entry point);
+        a safe no-op when the selection is a section, a group or nothing."""
+        r = self._selected_row()
+        if r is not None and r.kind == "proc" and r.pid is not None:
+            self._open_inspector(r)
+
+    def _open_inspector(self, row: Row) -> None:
+        if self._insp is not None:
+            dlg = self._insp
+            self._insp_closed(dlg)
+            dlg.close()
+        self._insp_token += 1
+        self._insp_target = (row.pid, row.start)
+        dlg = InspectorDialog(self, row)
+        self._insp = dlg
+        if _HAS_ADW_DIALOG:
+            dlg.present(self.win)
+        else:
+            dlg.show()
+        self._insp_arm()
+
+    def _insp_arm(self) -> None:
+        """First snapshot now, then one inspect_process per 2 s while open and shown."""
+        self._insp_stop_timer()
+        self._insp_fetch()
+        if self._insp is not None and self._shown and not self._insp_timer:
+            self._insp_timer = GLib.timeout_add(INSPECT_MS, self._insp_tick)
+
+    def _insp_fetch(self) -> None:
+        """One inspect_process snapshot for the inspected identity, off-thread.
+
+        The read follows the hub's root — the fake tree in fake mode, where the
+        read-only inspection is intended; the hub.fake guard stays on the writes
+        (dialog Stop / Force Stop and the priority Apply) and on nothing else.
+        """
+        if self._insp is None or self._insp_target is None or not self._shown:
+            return
+        pid, start = self._insp_target
+        token = self._insp_token
+        if self._insp_pending == token:
+            return
+        self._insp_pending = token
+        run_bg(inspect_process, pid, start, self.hub.root,
+               done=lambda d: self._insp_deliver(token, pid, start, d),
+               error=lambda _exc: self._insp_deliver(token, pid, start, None))
+
+    def _insp_tick(self) -> bool:
+        if self._insp is None or not self._shown:
+            self._insp_timer = 0
+            return GLib.SOURCE_REMOVE
+        self._insp_fetch()
+        return GLib.SOURCE_CONTINUE
+
+    def _insp_stop_timer(self) -> None:
+        if self._insp_timer:
+            GLib.source_remove(self._insp_timer)
+            self._insp_timer = 0
+
+    def _insp_deliver(self, token: int, pid: int, start: int, detail) -> None:
+        """Delivery guard: token, dialog still open, identity and page still shown."""
+        if self._insp_pending == token:
+            self._insp_pending = None
+        if detail is None or token != self._insp_token or self._insp is None:
+            return
+        if (pid, start) != self._insp_target or not self._shown:
+            return
+        self._insp.got_detail(detail)
+
+    def _insp_closed(self, dlg) -> None:
+        if self._insp is not dlg:
+            return
+        self._insp_token += 1
+        self._insp_stop_timer()
+        self._insp = None
+        self._insp_target = None
+
+    def _insp_priority_done(self, token: int, pid: int, start: int, eff: int) -> None:
+        if token != self._insp_token or self._insp is None \
+                or self._insp_target != (pid, start):
+            return
+        self._insp.got_priority(eff)
+
+    def _insp_priority_error(self, token: int, pid: int, start: int, exc) -> None:
+        if token != self._insp_token or self._insp is None \
+                or self._insp_target != (pid, start):
+            return
+        if isinstance(exc, ProcessLookupError):  # gone between Apply and the readback
+            self._insp._mark_gone("exited")
+        else:  # EACCES or a nice that did not take effect: one honest toast
+            self.win.toast(str(exc) or type(exc).__name__)

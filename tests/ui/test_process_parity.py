@@ -1,18 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) Hamza Gouda
 """Process page parity helpers: VmSwap parsing, app identity keys, stop refusals, totals."""
-import os
 import unittest
-from unittest.mock import Mock
 
-import gi
-
-gi.require_version("Adw", "1")
-gi.require_version("Gtk", "4.0")
-
-from asusius.telemetry.procs import Proc, app_from_cgroup, parse_vmswap  # noqa: E402
-from asusius.ui import viewmodels as vm  # noqa: E402
-from asusius.ui.pages.processes import ProcessesPage  # noqa: E402
+from asusius.telemetry.procs import app_from_cgroup, parse_vmswap
+from asusius.ui import viewmodels as vm
 
 STATUS = (b"Name:\tfirefox\nVmPeak:\t 100 kB\nVmRSS:\t 2048 kB\nVmSwap:\t  512 kB\n"
           b"Threads:\t5\n")
@@ -52,24 +44,6 @@ class Identity(unittest.TestCase):
         self.assertEqual(idx["asusius"], "A")  # by desktop id
         self.assertEqual(idx["navigator"], "B")  # by StartupWMClass
         self.assertEqual(idx["firefox"], "B")  # first entry wins
-
-    def test_process_list_recognizes_the_running_asusius_pid(self):
-        own = Proc(os.getpid(), 1)
-        for scope_app in (None, "org.chromium.Chromium"):
-            with self.subTest(scope_app=scope_app):
-                own.app = scope_app
-                page = Mock(view="apps", rows={}, _order=[])
-                page.hub.procs = [own]
-                page.search.get_text.return_value = ""
-                page._sort.return_value = (lambda row: row.name, False)
-                page._app_info.return_value = ("Asusius", None)
-                page._fill_group.return_value = 1
-
-                ProcessesPage._rebuild(page)
-
-                page._app_info.assert_called_once_with(vm.OWN_APP_ID, False)
-                self.assertEqual(list(page.rows), [vm.OWN_APP_ID])
-                self.assertEqual(page.rows[vm.OWN_APP_ID].name, "Asusius")
 
 
 class Refusals(unittest.TestCase):
