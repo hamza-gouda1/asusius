@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) Hamza Gouda
-"""Display-free chart maths: visible window, downsampling, gaps, monotone curves, ticks.
+"""Display-free chart maths: axis spans, visible window, downsampling, gaps, curves, ticks.
 
 The curve is a monotone cubic (Fritsch-Carlson): it passes through every sample and
 never overshoots between them, so a smooth line cannot show a peak that was not
@@ -44,6 +44,33 @@ def nice_range(lo: float, hi: float, floor: float | None = 0.0, min_span: float 
     if b <= a:
         b = a + step
     return a, b, step
+
+
+def axis_span(y_fixed: tuple[float, float] | None, floor: float | None, min_span: float,
+              target: int, lo: float, hi: float,
+              seen: tuple[float, float] | None) -> tuple[float, float, float]:
+    """(axis min, axis max, tick step) for one frame — the pure Chart._draw axis logic.
+
+    Free axis (y_fixed falsy: None, or a degenerate empty tuple — the same truthiness
+    check as the inline code this replaced): round ticks over the data [lo, hi], then
+    widened against `seen` — the span drawn last frame, which the caller stores — so a
+    sliding window only ever widens the scale, and the tick labels re-derive live from
+    the widened span. Fixed axis: the exact (ymin, ymax) span unless a real value would
+    clip above it; then it widens once through nice_range so a spike is never drawn out
+    of the plot.
+    """
+    if y_fixed:
+        ymin, ymax = y_fixed
+        if hi > ymax:  # never clip a real value
+            return nice_range(ymin, hi, floor, min_span)
+        return ymin, ymax, nice_step(ymax - ymin, target)
+    lo = 0.0 if lo == math.inf else lo
+    hi = 0.0 if hi == -math.inf else hi
+    ymin, ymax, step = nice_range(lo, hi, floor, min_span, target)
+    if seen is not None:
+        ymin, ymax = min(ymin, seen[0]), max(ymax, seen[1])
+        step = nice_step(ymax - ymin, target)
+    return ymin, ymax, step
 
 
 def window_points(times, values, idx_iter, slot, t0: float, t1: float, width: float,

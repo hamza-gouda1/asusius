@@ -14,7 +14,7 @@ import cairo
 from gi.repository import Gtk, Pango, PangoCairo
 
 from . import theme
-from .chartmath import bezier_controls, nice_range, nice_step, segments, window_points
+from .chartmath import axis_span, bezier_controls, segments, window_points
 
 NAN = math.nan
 
@@ -79,20 +79,29 @@ def _text(cr, layout, text, x, y, rgba, align="left", valign="top"):
 class Chart(Gtk.DrawingArea):
     """Time-series area chart: grid, y labels, time axis, current value, hover readout.
 
-    compact=True is the dashboard card style (labels inside the plot, no hover);
-    otherwise a left gutter holds the y labels and hovering shows exact samples.
+    compact=True is the dashboard card style (labels outside the plot on the right, no
+    hover); otherwise a left gutter holds the y labels and hovering shows exact samples.
+    dense_grid=True (opt-in) draws half-step minor horizontal gridlines when the plot is
+    tall enough (ph >= 140); in compact cards it instead raises the target ticks 3 -> 6
+    and also draws the vertical time gridlines. monitor=True (opt-in) is the plot-forward
+    layout: y labels move inside the plot, right-aligned at its right edge, the left
+    gutter shrinks to a hairline and hover readouts are kept. Monitor charts draw those
+    inside labels at every width — there is no w < 480 conditional; regular charts keep
+    their left gutter however narrow the widget gets.
     """
 
     def __init__(self, hub, lines: list[Line], window_s: float = 120.0,
                  y_fixed: tuple[float, float] | None = None, floor: float | None = 0.0,
                  min_span: float = 1.0, fmt=None, stacked: bool = False,
-                 compact: bool = False, height: int = 120, use_max: bool = True) -> None:
+                 compact: bool = False, height: int = 120, use_max: bool = True,
+                 dense_grid: bool = False, monitor: bool = False) -> None:
         super().__init__()
         self.hub, self.lines = hub, lines
         self.window_s = window_s
         self.y_fixed, self.floor, self.min_span = y_fixed, floor, min_span
         self.fmt = fmt or (lambda v: f"{v:g}")
         self.stacked, self.compact, self.use_max = stacked, compact, use_max
+        self.dense_grid, self.monitor = dense_grid, monitor
         self.set_content_height(height)
         self.set_hexpand(True)
         self.add_css_class("chart")
@@ -159,21 +168,12 @@ class Chart(Gtk.DrawingArea):
                     if v > hi:
                         hi = v
         target = 3 if self.compact else max(3, min(6, int((h - 28) / 30)))
-        if self.y_fixed:
-            ymin, ymax = self.y_fixed
-            if hi > ymax:  # never clip a real value
-                ymin, ymax, step = nice_range(ymin, hi, self.floor, self.min_span)
-            else:
-                step = nice_step(ymax - ymin, target)
-        else:
-            ymin, ymax, step = nice_range(lo if lo != math.inf else 0.0,
-                                          hi if hi != -math.inf else 0.0,
-                                          self.floor, self.min_span, target)
-            # the axis must not move with the data: it only widens, never shrinks
-            if self._seen is not None:
-                ymin, ymax = min(ymin, self._seen[0]), max(ymax, self._seen[1])
-                step = nice_step(ymax - ymin, target)
-            self._seen = (ymin, ymax)
+        if self.compact and self.dense_grid:
+            target = 6  # dense compact cards split the same span finer
+        ymin, ymax, step = axis_span(self.y_fixed, self.floor, self.min_span, target, lo, hi,
+                                     self._seen)
+        if not self.y_fixed:  # same truthiness as the old inline check (None or ())
+            self._seen = (ymin, ymax)  # the free axis only ever widens; labels re-derive
         ticks = []
         v = ymin
         while v <= ymax + step * 1e-6 and len(ticks) < 12:
@@ -186,6 +186,9 @@ class Chart(Gtk.DrawingArea):
             lab_w = max(lab_w, layout.get_pixel_size()[0])
         if self.compact:
             gl, gr, gt, gb = 0.0, lab_w + 8.0, 6.0, 16.0
+        elif self.monitor:
+            # plot-forward: the left gutter shrinks to a hairline, labels go inside
+            gl, gr, gt, gb = 6.0, 8.0, 8.0, 20.0
         else:
             gl, gr, gt, gb = max(30.0, lab_w + 10.0), 8.0, 8.0, 20.0
         pw, ph = max(1.0, w - gl - gr), max(1.0, h - gt - gb)
@@ -197,6 +200,15 @@ class Chart(Gtk.DrawingArea):
         cr.set_line_width(1)
         dim = pal["dim"]
         label_rgba = (*dim[:3], dim[3] * (0.85 if self.compact else 1.0))
+        if self.dense_grid and not self.compact and ph >= 140:
+            # dense_grid's only regular-mode effect: half-step minor lines, tall plots
+            cr.set_source_rgba(*pal["grid"][:3], pal["grid"][3] * 0.6)
+            for k in range(len(ticks)):
+                my = round(px_y(ymin + (k + 0.5) * step)) + 0.5
+                if gt < my < gt + ph:
+                    cr.move_to(gl, my)
+                    cr.line_to(gl + pw, my)
+                    cr.stroke()
         for t, text in zip(ticks, texts):
             y = round(px_y(t)) + 0.5
             cr.set_source_rgba(*pal["grid"])
@@ -205,6 +217,10 @@ class Chart(Gtk.DrawingArea):
             cr.stroke()
             if self.compact:
                 _text(cr, layout, text, w, y, label_rgba, "right", "middle")
+            elif self.monitor:
+                # plot-forward: labels sit inside the plot, right-aligned at its right
+                # edge, at every width; regular charts keep their gutter however narrow
+                _text(cr, layout, text, gl + pw, y, label_rgba, "right", "middle")
             else:
                 _text(cr, layout, text, gl - 6, y, label_rgba, "right", "middle")
         if ticks and ticks[-1] < ymax - step * 0.05:  # unlabelled top edge (e.g. RAM size)
@@ -218,16 +234,26 @@ class Chart(Gtk.DrawingArea):
         # time axis
         ty = gt + ph + (2 if self.compact else 5)
         marks = ((0.0, 0.5, 1.0) if self.compact else (0.0, 0.25, 0.5, 0.75, 1.0))
+        label_marks = marks
+        if self.monitor and not self.compact:
+            layout.set_text(f"−{int(self.window_s)} s", -1)
+            label_w = layout.get_pixel_size()[0]
+            gap = 1.5 * label_w + 8  # left-aligned endpoint beside a centred label
+            if pw / 2 < gap:
+                label_marks = (0.0, 1.0)
+            elif pw / 4 < gap:
+                label_marks = (0.0, 0.5, 1.0)
         for frac in marks:
             lab = "now" if frac == 1.0 else f"−{int(self.window_s * (1 - frac))} s"
             x = gl + frac * pw
-            if not self.compact and 0 < frac < 1:
+            if (self.dense_grid or not self.compact) and 0 < frac < 1:
                 cr.set_source_rgba(*pal["grid"])
                 cr.move_to(round(x) + 0.5, gt)
                 cr.line_to(round(x) + 0.5, gt + ph)
                 cr.stroke()
-            _text(cr, layout, lab, x, ty, label_rgba,
-                  "left" if frac == 0 else ("right" if frac == 1 else "center"))
+            if frac in label_marks:
+                _text(cr, layout, lab, x, ty, label_rgba,
+                      "left" if frac == 0 else ("right" if frac == 1 else "center"))
         # series, back to front so the first line is drawn on top
         cr.save()
         cr.rectangle(gl, gt - 2, pw + 1, ph + 4)
