@@ -12,6 +12,21 @@ import os
 NAN = float("nan")
 
 
+def powercap_watts(previous: int, current: int, seconds: float,
+                   counter_range: int | None) -> float | None:
+    """Average power over a fresh interval, accepting plausible single rollovers."""
+    if not 0.2 <= seconds <= 30 or min(previous, current) < 0:
+        return None
+    if counter_range and max(previous, current) > counter_range:
+        return None
+    delta = current - previous
+    if delta < 0:
+        if not counter_range or previous < 0.75 * counter_range or current > 0.25 * counter_range:
+            return None
+        delta += counter_range
+    return delta / 1e6 / seconds
+
+
 def read_bytes(path: str, limit: int = 1 << 20) -> bytes | None:
     """Whole file as bytes (proc files may need several reads); None when unreadable."""
     try:

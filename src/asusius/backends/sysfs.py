@@ -22,6 +22,7 @@ from ..core import (
     Unsupported,
     ValidationError,
 )
+from ..telemetry.util import powercap_watts
 from .base import Backend
 from .util import DirectWriter, FallbackWriter, Writer, read_text, run_cmd
 
@@ -49,6 +50,9 @@ class SysfsBackend(Backend):
             FallbackWriter() if str(root) == "/" else DirectWriter())
         self.use_nvidia_smi = use_nvidia_smi
         self._rapl_prev: tuple[int, float] | None = None
+        # the counter wraps at this many µJ (absent/unreadable when the kernel hides it)
+        self._rapl_range = _int(
+            read_text(self._p("sys/class/powercap/intel-rapl:0/max_energy_range_uj")))
 
     # -- paths ------------------------------------------------------------
     def _p(self, rel: str) -> Path:
@@ -422,12 +426,12 @@ class SysfsBackend(Backend):
         dgpu = self._dgpu_dir()
         t.gpu_runtime = read_text(dgpu / "power/runtime_status") if dgpu else None
         is_nvidia = dgpu is not None and read_text(dgpu / "vendor") == "0x10de"
-        # Only query active/unsupported GPUs so suspended dGPUs stay asleep
-        if self.use_nvidia_smi and is_nvidia and t.gpu_runtime in (None, "active", "unsupported"):
+        # Probe only identified NVIDIA dGPUs whose runtime PM says "active" or
+        # "unsupported": a None (unreadable/absent) runtime stays untouched, like
+        # gpu_nvidia.py, so a suspended GPU is never woken by nvidia-smi
+        if self.use_nvidia_smi and is_nvidia and t.gpu_runtime in ("active", "unsupported"):
             self._fill_gpu(t)
-        elif dgpu is None and self.use_nvidia_smi and not self._p("sys/bus/pci/devices").exists():
-            self._fill_gpu(t)
-        elif t.gpu_runtime in (None, "active", "unsupported"):
+        elif t.gpu_runtime in ("active", "unsupported") or dgpu is None:
             self._fill_amd_gpu(t, dgpu)
         return t
 
@@ -437,7 +441,7 @@ class SysfsBackend(Backend):
             for d in sorted(self._p("sys/bus/pci/devices").glob("*")):
                 if ((read_text(d / "class") or "").startswith("0x03")
                         and read_text(d / "vendor") == "0x1002"):
-                    if read_text(d / "power/runtime_status") in ("active", "unsupported", None):
+                    if read_text(d / "power/runtime_status") in ("active", "unsupported"):
                         target = d
                         break
         if target is None:
@@ -458,12 +462,13 @@ class SysfsBackend(Backend):
         """CPU package power from the RAPL energy counter (often root-only)."""
         e = _int(read_text(self._p("sys/class/powercap/intel-rapl:0/energy_uj")))
         if e is None:
+            self._rapl_prev = None
             return None
         now = time.monotonic()
         prev, self._rapl_prev = self._rapl_prev, (e, now)
-        if prev is None or now - prev[1] < 0.2 or e < prev[0]:
-            return None
-        return round((e - prev[0]) / 1e6 / (now - prev[1]), 1)
+        watts = None if prev is None else powercap_watts(
+            prev[0], e, now - prev[1], self._rapl_range)
+        return None if watts is None else round(watts, 1)
 
     @staticmethod
     def _fill_gpu(t: Telemetry) -> None:

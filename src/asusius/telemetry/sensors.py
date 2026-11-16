@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 import re
 
-from .util import join, listdir, read_int, read_str
+from .util import join, listdir, powercap_watts, read_int, read_str
 
 RAPL_ROOT_ONLY = ("needs root: the kernel makes the RAPL energy counter root-only "
                   "(since 5.10, against the PLATYPUS power side channel)")
@@ -188,11 +188,9 @@ class Sensors:
                 self.rapl_reason = RAPL_ROOT_ONLY
             else:
                 prev, self._rapl_prev = self._rapl_prev, (now, e)
-                if prev is not None and now > prev[0]:
-                    de = e - prev[1]
-                    if de < 0 and self.rapl_range:
-                        de += self.rapl_range  # counter wrapped
-                    if de >= 0:
-                        vals["power.cpu"] = de / 1e6 / (now - prev[0])
+                if prev is not None:
+                    watts = powercap_watts(prev[1], e, now - prev[0], self.rapl_range)
+                    if watts is not None:
+                        vals["power.cpu"] = watts
         out["rapl_reason"] = self.rapl_reason
         info["sensors"] = out
