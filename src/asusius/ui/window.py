@@ -188,6 +188,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.add_breakpoint(bp)
         self.compact = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 640sp"))
         self.compact.add_setter(self.split, "collapsed", True)
+        self.compact.add_setter(self.pw_label, "visible", False)
         self.add_breakpoint(self.compact)
         self.responders: list = []  # fn(level): 0 wide, 1 <= 900, 2 <= 640, 3 <= 460 sp
         self.connect("notify::current-breakpoint", lambda *_: self._responsive())
@@ -493,8 +494,9 @@ class MainWindow(Adw.ApplicationWindow):
 
     def on_telemetry(self, t) -> None:
         self.pw_icon.set_from_icon_name(battery_icon(t.battery_percent, t.battery_status))
-        self.pw_label.set_label(power_state_text(t.battery_status, t.battery_percent))
-        self.pw_box.set_tooltip_text(t.battery_status or "On AC power")
+        power_text = power_state_text(t.battery_status, t.battery_percent)
+        self.pw_label.set_label(power_text)
+        self.pw_box.set_tooltip_text(power_text or "On AC power")
         for page in self.pages.built.values():
             page.on_telemetry(t)
 
