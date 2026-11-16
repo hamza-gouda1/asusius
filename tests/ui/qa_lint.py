@@ -16,8 +16,14 @@ automation, agent and daemon state live in a temp dir). Sizes: 1920x1080 maximis
 the owner's real ~/.config/gtk-4.0/gtk.css and settings.ini loaded (read-only).
 Extra modes (`--modes`, default on at 1280x720 and 640x700, dark): `rtl` (right-to-left
 layout), `scale` (text scaling 1.5), `long` (80-character process names, very long GPU,
-disk, mount and rule names), `empty` (no sensors, no battery, no dGPU: empty states) and
-`ppt` (firmware that exposes power limits).
+disk, mount and rule names), `empty` (no sensors, no battery, no dGPU: empty states),
+`ppt` (firmware that exposes power limits) and the battery states `bat-hist`
+(populated UPower history), `bat-short` / `bat-empty` (short / no history rows),
+`bat-charging` (AC online=1 + battery charging), `bat-periph` (peripheral present),
+`bat-multi` (two laptop batteries -> aggregate row) and `bat-nodev` (no power_supply
+entries -> dashes); the battery ones drive the page through an in-memory fake UPower
+(LiveHub.set_upower) and run the battery page only. The text-scale battery check is
+the existing `scale` mode, which visits every page at 150%.
 
 Memory safety. Everything is re-executed under
 `systemd-run --user --scope -p MemoryMax=1500M -p MemorySwapMax=0`, one GTK process at a
@@ -62,9 +68,15 @@ from qa_core import (PAGES, SIZES, VARIANTS, Collected, Finding, log_failures,  
 
 MEM_MAX = "1500M"
 CHILD_TIMEOUT = 420
-MODES = ("rtl", "scale", "long", "empty", "ppt", "gpu-lost")
+MODES = ("rtl", "scale", "long", "empty", "ppt", "gpu-lost",
+         "bat-hist", "bat-short", "bat-empty", "bat-charging", "bat-periph",
+         "bat-multi", "bat-nodev")
 MODE_SIZES = ("1280x720", "640x700")
 THEME_PAIR_PAGES = ("dashboard", "performance", "fans", "battery", "processes")  # not the keyboard: live colour
+# battery QA mode -> scenario name in telemetry.fake.fake_upower_client
+BAT_SCENARIOS = {"bat-hist": "populated", "bat-short": "short", "bat-empty": "empty",
+                 "bat-charging": "populated", "bat-periph": "peripheral",
+                 "bat-multi": "multi"}
 
 
 def snapshot_widget(widget):
@@ -108,7 +120,8 @@ def jobs(args) -> list:
         out.append(("dark", "1280x720", "real"))
     if args.modes:
         for mode in args.modes.split(","):
-            for size in [s for s in MODE_SIZES if s in sizes]:
+            for size in (s for s in sizes if s in MODE_SIZES
+                         or (mode == "bat-hist" and s == "360x640")):
                 out.append(("dark", size, mode))
     return out
 
@@ -346,6 +359,30 @@ def child(job: dict) -> int:
             return original_sample(gpu, now, vals, info)
 
         NvidiaGpu.sample = lost_sample
+    if mode == "bat-charging":
+        # ensure() rewrites ADP0/online at hub creation, so the plugged-in state is
+        # re-applied on top of it (status itself is never rewritten by ensure)
+        from asusius.telemetry import fake as tfake
+        orig_ensure = tfake.ensure
+
+        def ensure_charging(r):
+            orig_ensure(r)
+            supply = Path(r) / "sys/class/power_supply"
+            (supply / "ADP0/online").write_text("1\n")
+            (supply / "BAT0/status").write_text("Charging\n")
+        tfake.ensure = ensure_charging
+        tfake.ensure(root)
+    if mode == "bat-nodev":
+        # no power_supply entries at all: every battery reading renders as a dash
+        from asusius.telemetry import fake as tfake
+        orig_ensure = tfake.ensure
+
+        def ensure_no_power(r):
+            orig_ensure(r)
+            shutil.rmtree(Path(r) / "sys/class/power_supply", ignore_errors=True)
+        tfake.ensure = ensure_no_power
+        tfake.FakeWorld.advance = lambda self, now: None  # it would rewrite BAT0
+        shutil.rmtree(root / "sys/class/power_supply", ignore_errors=True)
     if not real:
         sh.seed_agent_demo()
     if long_mode:
@@ -461,7 +498,7 @@ def child(job: dict) -> int:
             hub.store.clear()
             hub.procs_wanted = True
             for i in range(120):
-                if mode != "empty":
+                if mode not in ("empty", "bat-nodev"):
                     sh.simulate(root, i)
                 clock["t"] += 1.0
                 hub.collect_now(clock["t"])
@@ -476,6 +513,12 @@ def child(job: dict) -> int:
         pages = [p for p in (job["pages"].split(",") if job["pages"] else PAGES) if p in win.pages]
         if mode == "ppt":
             pages = [p for p in ("performance", "dashboard") if p in pages]
+        bat_client = None
+        if mode in BAT_SCENARIOS:  # the battery states drive the page over a fake UPower
+            from asusius.telemetry.fake import fake_upower_client
+            bat_client = fake_upower_client(BAT_SCENARIOS[mode])
+            hub.set_upower(bat_client)
+            pages = [p for p in ("battery",) if p in pages]
 
         # -- theme pairs: a pass in the app's own scheme, then one in light ------------------
         do_pairs = not mode and size == "1280x720" or (not mode and job.get("pairs_all"))
@@ -530,6 +573,19 @@ def child(job: dict) -> int:
                     if "restart" not in text.lower() or "lost" not in text.lower():
                         emit(Finding("gpu-lost", "fail", key, "recovery message",
                                      "lost GPU recovery guidance missing without NVML"))
+                if key == "battery" and bat_client is not None:
+                    for _ in range(20):  # the hub must serve the page's history calls
+                        if "GetHistory" in bat_client.t.calls:
+                            break
+                        yield 100
+                    if "GetHistory" not in bat_client.t.calls:
+                        emit(Finding("battery-qa", "fail", key, "history",
+                                     "the battery page never fetched UPower history "
+                                     "from the fake transport"))
+                    sh._scroll_to(page, page.hist_group)  # the history section itself
+                    yield 250
+                    if job.get("keep_shots"):
+                        save_shot(frame(), f"history-{name}.png")
                 if key == "processes":
                     pp = win.pages["processes"]
                     row = pp.tree.get_row(0)  # Apps section row
