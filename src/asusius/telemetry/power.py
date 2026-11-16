@@ -31,6 +31,8 @@ class Power:
                 self.batteries.append(os.path.join(base, n))
             elif t == "Mains":
                 self.adapters.append(os.path.join(base, n))
+        # absolute sysfs battery dirs, for matching UPower devices (telemetry.upower)
+        self.native_paths = list(self.batteries)
 
     def sample(self, now: float, vals: dict, info: dict) -> None:
         out = {"present": bool(self.batteries)}

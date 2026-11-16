@@ -14,7 +14,10 @@ from __future__ import annotations
 import json
 import math
 import os
+import time
 from pathlib import Path
+
+from .upower import HISTORY_SERIES, UpowerClient
 
 NCPU = 24
 P_THREADS = 16
@@ -454,3 +457,198 @@ class FakeWorld:
             "procs": {"3488": {"type": "C+G", "vram": vram - (380 << 20),
                                "sm": round(100 * game_dgpu)},
                       "1460": {"type": "G", "vram": 2 << 20, "sm": None}}}))
+
+
+# ---- fake UPower (tests and QA; injected into ui.live.LiveHub via upower=) ----------
+
+# A fixed epoch base so every generated timestamp — and therefore every QA
+# screenshot — is deterministic across runs.
+UPOWER_BASE_T = 1_810_000_000.0
+UPOWER_CHARGING, UPOWER_DISCHARGING = 1, 2  # UpDeviceState ids (telemetry.upower)
+
+UPOWER_BAT0 = "/org/freedesktop/UPower/devices/battery_BAT0"
+UPOWER_BAT1 = "/org/freedesktop/UPower/devices/battery_BAT1"
+UPOWER_AC = "/org/freedesktop/UPower/devices/line_power_AC"
+UPOWER_MOUSE = "/org/freedesktop/UPower/devices/mouse_0003o046Do101Ax0006"
+UPOWER_UPS = "/org/freedesktop/UPower/devices/ups_dev"
+UPOWER_DUP = "/org/freedesktop/UPower/devices/battery_BAT0b"
+UPOWER_SYSFS_BAT0 = "/sys/devices/LNXSYSTM:00/LNXSYBUS:00/PNP0C0A:00/power_supply/BAT0"
+UPOWER_SYSFS_BAT1 = "/sys/devices/LNXSYSTM:00/LNXSYBUS:00/PNP0C0A:00/power_supply/BAT1"
+
+
+class FakeUpowerTransport:
+    """In-memory org.freedesktop.UPower implementing A's UpowerTransport seam.
+
+    Devices are raw property dicts shaped like GetAll(org.freedesktop.UPower.Device)
+    replies; history rows are (t, value, state) triples keyed by (object path, series
+    name). Mutating the dicts between client calls drives hotplug / removal / restart
+    drills in tests and the QA harness. No D-Bus, no gi, no threads.
+    """
+
+    def __init__(self, owner: bool = True) -> None:
+        self.owner = owner  # NameHasOwner answer; False simulates an absent service
+        self.devices: dict[str, dict] = {}               # object path -> properties
+        self.history: dict[tuple[str, str], list] = {}   # (object path, series) -> rows
+        self.calls: list[str] = []
+
+    # -- fixture editing -----------------------------------------------------------------
+    def add(self, object_path: str, **props) -> dict:
+        self.devices[object_path] = dict(props)
+        return self.devices[object_path]
+
+    def remove(self, object_path: str) -> None:
+        """Hotplug-out: the device disappears from the next EnumerateDevices."""
+        self.devices.pop(object_path, None)
+        for key in [k for k in self.history if k[0] == object_path]:
+            del self.history[key]
+
+    def set_history(self, object_path: str, series: str, rows: list) -> None:
+        self.history[(object_path, series)] = list(rows)
+
+    # -- the UpowerTransport protocol ----------------------------------------------------
+    def name_has_owner(self, name: str) -> bool:
+        self.calls.append("name_has_owner")
+        return self.owner
+
+    def call(self, dest: str, path: str, iface: str, method: str,
+             sig: str | None = None, args: tuple = ()):
+        self.calls.append(method)
+        if method == "EnumerateDevices":
+            return (sorted(self.devices),)
+        if method == "GetHistory":
+            assert sig == "(suu)" and args[0] in HISTORY_SERIES
+            series = args[0]
+            return (list(self.history.get((path, series), [])),)
+        raise AssertionError(f"unexpected D-Bus call {method}")
+
+    def get_all(self, dest: str, path: str, iface: str) -> dict:
+        self.calls.append("get_all")
+        return dict(self.devices.get(path, {}))
+
+
+def upower_battery_props(native_path: str = UPOWER_SYSFS_BAT0, model: str = "GU60558",
+                         percent: float | None = 87.5, state: int = UPOWER_DISCHARGING,
+                         watts: float | None = 12.4, voltage: float | None = 15.7,
+                         energy: float | None = 44.6, energy_full: float | None = 51.3,
+                         energy_design: float | None = 60.0, cycles: int | None = 128,
+                         present: bool = True) -> dict:
+    """One laptop battery as UPower's GetAll returns it (identity = native_path +
+    model; the serial is deliberately omitted from the fixtures)."""
+    props: dict = {"NativePath": native_path, "Type": 2, "State": state,
+                   "Model": model, "Vendor": "ASUSTeK", "IsPresent": present}
+    if percent is not None:
+        props["Percentage"] = percent
+    if watts is not None:
+        props["EnergyRate"] = watts
+    if voltage is not None:
+        props["Voltage"] = voltage
+    if energy is not None:
+        props["Energy"] = energy
+    if energy_full is not None:
+        props["EnergyFull"] = energy_full
+    if energy_design is not None:
+        props["EnergyFullDesign"] = energy_design
+    if cycles is not None:
+        props["CycleCount"] = cycles
+    return props
+
+
+def upower_battery_history(hours: float = 24.0, step_s: float = 300.0,
+                           base_t: float = UPOWER_BASE_T, gap: bool = True,
+                           max_points: int | None = None) -> dict[str, list]:
+    """Deterministic charge/rate/voltage history over the last `hours`.
+
+    The story: plugged in and charging for the older half (percent rising to 100,
+    high rate, ~16.1 V), then discharging for the newer half (percent falling, the
+    draw wandering around 12-24 W, voltage sagging). A gap sits in the middle —
+    UPower lost samples there and the chart must break line and fill, never
+    interpolate. Newest point lands exactly on base_t; rows are oldest first.
+    max_points keeps only the newest points (the "short" scenario).
+    """
+    n = max(2, int(hours * 3600 / step_s))
+    charge: list[tuple] = []
+    rate: list[tuple] = []
+    voltage: list[tuple] = []
+    for i in range(n + 1):
+        f = i / n
+        t = base_t - (n - i) * step_s
+        if gap and 0.45 <= f < 0.55:  # the hole: no rows at all here
+            continue
+        if f < 0.5:  # charging stretch
+            state = UPOWER_CHARGING
+            pct = min(100.0, 55.0 + 90.0 * f)
+            w = 28.0 + 4.0 * math.sin(i * 0.7)
+            v = 16.10 + 0.05 * math.sin(i * 0.3)
+        else:        # discharging stretch
+            state = UPOWER_DISCHARGING
+            pct = max(38.0, 100.0 - 62.0 * (f - 0.5) * 2)
+            w = 15.0 + 5.0 * math.sin(i * 0.9) + 3.0 * math.sin(i * 0.23)
+            v = 15.80 - 0.9 * (f - 0.5) * 2
+        charge.append((int(t), round(pct, 1), state))
+        rate.append((int(t), round(max(2.0, w), 2), state))
+        voltage.append((int(t), round(v, 3), state))
+    if max_points is not None:
+        charge, rate, voltage = (s[-max_points:] for s in (charge, rate, voltage))
+    return {"charge": charge, "rate": rate, "voltage": voltage}
+
+
+def _add_battery(transport: FakeUpowerTransport, path: str, native_path: str,
+                 model: str, percent: float, history: dict[str, list] | None,
+                 **props) -> None:
+    transport.add(path, **upower_battery_props(native_path=native_path, model=model,
+                                               percent=percent, **props))
+    if history is not None:
+        for series, rows in history.items():
+            transport.set_history(path, series, rows)
+
+
+def fake_upower_transport(scenario: str = "populated",
+                          base_t: float = UPOWER_BASE_T) -> FakeUpowerTransport:
+    """A configured fake UPower bus for the QA battery modes and the tests.
+
+    Scenarios (each also carries the AC line power, which is never a battery row):
+    populated (24 h charge/rate/voltage with charging + discharging states and one
+    gap), short (a handful of points), empty (devices but no history rows),
+    peripheral (laptop plus a mouse with a coarse percent), multi (two laptop
+    batteries -> the aggregate case), duplicate (two UPower records sharing one
+    native_path + model, which render as two rows) and ups (a UPS in its own group).
+    """
+    t = FakeUpowerTransport()
+    t.add(UPOWER_AC, Type=1, Model="AC", NativePath="/sys/devices/AC")
+    populated = upower_battery_history(base_t=base_t)
+    if scenario == "populated":
+        _add_battery(t, UPOWER_BAT0, UPOWER_SYSFS_BAT0, "GU60558", 87.5, populated)
+    elif scenario == "short":
+        _add_battery(t, UPOWER_BAT0, UPOWER_SYSFS_BAT0, "GU60558", 87.5,
+                     upower_battery_history(base_t=base_t, max_points=5))
+    elif scenario == "empty":
+        _add_battery(t, UPOWER_BAT0, UPOWER_SYSFS_BAT0, "GU60558", 87.5, None)
+    elif scenario == "peripheral":
+        _add_battery(t, UPOWER_BAT0, UPOWER_SYSFS_BAT0, "GU60558", 87.5, populated)
+        t.add(UPOWER_MOUSE, Type=5, Percentage=65, State=UPOWER_DISCHARGING,  # coarse
+              Model="Wireless Mouse", Vendor="Logi", IsPresent=True, Voltage=None,
+              NativePath="")
+    elif scenario == "multi":
+        _add_battery(t, UPOWER_BAT0, UPOWER_SYSFS_BAT0, "GU60558", 87.5, populated)
+        _add_battery(t, UPOWER_BAT1, UPOWER_SYSFS_BAT1, "GU60558B", 41.0,
+                     upower_battery_history(hours=24.0, step_s=600.0, base_t=base_t),
+                     energy=21.0, energy_full=50.0, energy_design=60.0)
+    elif scenario == "duplicate":
+        # one physical battery reported twice: same native_path + model, two rows
+        _add_battery(t, UPOWER_BAT0, UPOWER_SYSFS_BAT0, "GU60558", 87.5, populated)
+        _add_battery(t, UPOWER_DUP, UPOWER_SYSFS_BAT0, "GU60558", 87.5, populated)
+    elif scenario == "ups":
+        _add_battery(t, UPOWER_BAT0, UPOWER_SYSFS_BAT0, "GU60558", 87.5, populated)
+        t.add(UPOWER_UPS, Type=3, Percentage=89, State=UPOWER_DISCHARGING,
+              Model="Back-UPS ES 700", Vendor="APC", IsPresent=True, EnergyRate=34.0,
+              Voltage=12.1, NativePath="/sys/devices/ups")
+    else:
+        raise ValueError(f"unknown UPower scenario {scenario!r}")
+    return t
+
+
+def fake_upower_client(scenario: str = "populated",
+                       base_t: float | None = None) -> UpowerClient:
+    """A real UpowerClient over a fake transport: the object LiveHub(upower=...)
+    and LiveHub.set_upower(...) take (tests, QA harness)."""
+    return UpowerClient(fake_upower_transport(scenario, time.time() if base_t is None else base_t))
