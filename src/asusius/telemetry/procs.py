@@ -104,8 +104,8 @@ def app_from_cgroup(text: str) -> tuple[str | None, str | None]:
 
 class Proc:
     __slots__ = ("pid", "ppid", "start", "name", "cmd", "uid", "state", "threads", "cpu",
-                 "mem", "rss", "swap", "io_read", "io_write", "gpu", "vram", "app", "unit",
-                 "kthread", "_ticks", "_io", "_t", "seen")
+                 "mem", "mem_partial", "rss", "swap", "io_read", "io_write", "gpu", "vram",
+                 "app", "unit", "kthread", "_ticks", "_io", "_t", "seen")
 
     def __init__(self, pid: int, start: int) -> None:
         self.pid, self.start = pid, start
@@ -115,6 +115,7 @@ class Proc:
         self.ppid = self.threads = 0
         self.cpu = self.io_read = self.io_write = None
         self.mem = self.rss = 0
+        self.mem_partial = False  # statm unreadable this pass: mem fell back to rss
         self.swap = None
         self.gpu = self.vram = None
         self.app = self.unit = None
@@ -197,9 +198,11 @@ class ProcessWalker:
                 resident, shared = int(f[1]), int(f[2])
                 p.rss = resident * PAGE
                 p.mem = max(0, resident - shared) * PAGE
+                p.mem_partial = False
             else:
                 p.rss = rss_pages * PAGE
                 p.mem = p.rss
+                p.mem_partial = True
             if not p.kthread:
                 stx = read_bytes(base + "/status", 4096)
                 p.swap = parse_vmswap(stx) if stx else None

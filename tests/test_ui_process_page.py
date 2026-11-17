@@ -981,5 +981,54 @@ class Priority(unittest.TestCase):
         d.got_priority.assert_called_once_with(10)
 
 
+class SortBy(unittest.TestCase):
+    """sort_by (the Memory page's Open Processes path) re-sorts the real ColumnView
+    by the requested column, descending, and keeps the section defaults."""
+
+    def real_page(self, procs):
+        page = ProcessesPage(Mock())
+        page.hub = SimpleNamespace(procs=list(procs), procs_gen=1)
+        page._aligned = True  # the header-alignment idle stays out of the tests
+        # a preset (empty) desktop index keeps _desktop_index() from starting the
+        # real background Gio.AppInfo scan on the shared worker pool: the orphaned
+        # thread races the next module's teardown and can segfault (GIO thread safety)
+        page._dindex, page._dindex_busy = {}, False
+        return page
+
+    def test_sort_by_mem_orders_the_flat_section_by_memory(self):
+        procs = [proc(10, name="small", mem=100), proc(11, name="big", mem=900),
+                 proc(12, name="mid", mem=500)]
+        page = self.real_page(procs)
+        page.sort_by("mem")
+        self.assertEqual([r.pid for r in page.sections[SECTION_PROCS].children],
+                         [11, 12, 10])  # descending by mem
+        sorter = page.cv.get_sorter()
+        self.assertIs(sorter.get_primary_sort_column(), page.cols["mem"])
+        self.assertEqual(sorter.get_primary_sort_order(), Gtk.SortType.DESCENDING)
+        self.assertEqual(page.cols["mem"].get_title(),
+                         f"Memory\n{fmt.bytes_(1500)}")  # the whole displayed set
+
+    def test_sort_by_keeps_apps_expanded_and_processes_collapsed(self):
+        page = self.real_page(web_procs())
+        page.sort_by("mem")
+        self.assertTrue(tree_row(page, SECTION_APPS).get_expanded())
+        self.assertFalse(tree_row(page, SECTION_PROCS).get_expanded())  # the default
+        self.assertEqual(page.tree.get_n_items(), 4)  # sections + Apps children only
+        tree_row(page, SECTION_PROCS).set_expanded(True)
+        page.sort_by("mem")  # an explicit user expansion is retained, not reset
+        self.assertTrue(tree_row(page, SECTION_PROCS).get_expanded())
+        self.assertCountEqual([r.pid for r in tree_items(page) if r.kind == "proc"],
+                              [2, 10, 11, 20])
+
+    def test_existing_grouping_survives_the_shared_helper(self):
+        # regression: _rebuild now groups through telemetry.app_memory.group_apps
+        p = fake_page(web_procs())
+        ProcessesPage._rebuild(p)
+        kids = p.sections[SECTION_APPS].children
+        self.assertEqual([k.key for k in kids], [APP, SYSTEM_KEY])  # pseudo-group last
+        self.assertEqual(kids[0].count, 2)
+        self.assertEqual(summary_text(p), "1 apps · 4 of 4 processes · CPU 7.0 %")
+
+
 if __name__ == "__main__":
     unittest.main()

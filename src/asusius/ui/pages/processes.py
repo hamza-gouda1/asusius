@@ -31,6 +31,7 @@ import signal
 from gi.repository import Adw, Gdk, Gio, GLib, GObject, Gtk, Pango
 
 from ...telemetry import fmt
+from ...telemetry.app_memory import group_apps
 from ...telemetry.procs import alive, inspect_process, kill, set_priority
 from ..tasks import run_bg
 from ..viewmodels import (OWN_APP_ID, OWN_APP_KEYS, desktop_index, norm_app_key,
@@ -138,6 +139,68 @@ def _ancestors(w):
 def _sum_opt(values) -> int | None:
     vals = [v for v in values if v is not None]
     return sum(vals) if vals else None
+
+
+def installed_desktop_index() -> dict:
+    """Index installed app entries on the GTK thread when a consumer opens."""
+    return desktop_index(
+        (info, info.get_id() or "", info.get_startup_wm_class(),
+         info.get_string("Exec") or "")
+        for info in Gio.AppInfo.get_all()
+        if isinstance(info, Gio.DesktopAppInfo))
+
+
+def app_display_info(app_id: str, launched: bool = True, cache: dict | None = None,
+                     dindex: dict | None = None):
+    """(name, icon) for an app id — the core of ProcessesPage._app_info, shared with
+    the Memory page's app panel so the panel never runs a second desktop scan.
+
+    cache is the caller's memo dict; dindex the warmed desktop index ({} when none
+    is available: direct .desktop id lookups still work). Without a .desktop file,
+    only a unit that was itself started as an app (app-*.scope/.service) counts, so
+    session slices stay out."""
+    cache = {} if cache is None else cache
+    if app_id in cache:
+        found = cache[app_id]
+        return found if found is None or found[1] is not None or launched else None
+    found = None
+    nk = norm_app_key(app_id)
+    if nk in OWN_APP_KEYS:  # this app, whatever launcher or scope name started it
+        try:
+            info = Gio.DesktopAppInfo.new(OWN_APP_ID + ".desktop")
+        except TypeError:
+            info = None
+        found = (info.get_name() if info else "Asusius",
+                 info.get_icon() if info else Gio.ThemedIcon.new(OWN_APP_ID))
+        cache[app_id] = found
+        return found
+    for cand in (app_id, app_id.split(".")[-1] if "." in app_id else None,
+                 app_id.lower()):
+        if not cand:
+            continue
+        try:
+            info = Gio.DesktopAppInfo.new(cand + ".desktop")
+        except TypeError:
+            info = None
+        if info is not None:
+            found = (info.get_name(), info.get_icon())
+            break
+    if found is None:  # by StartupWMClass, executable name or a differently spelled id
+        info = (dindex or {}).get(nk)
+        if info is not None:
+            found = (info.get_name(), info.get_icon())
+    for d in ("/etc/xdg/autostart", os.path.expanduser("~/.config/autostart")):
+        if found is None and os.path.exists(f"{d}/{app_id}.desktop"):
+            info = Gio.DesktopAppInfo.new_from_filename(f"{d}/{app_id}.desktop")
+            if info is not None:
+                found = (info.get_name(), info.get_icon())
+    if found is None and not launched:
+        return None
+    if found is None:  # launched as an app (systemd scope) but no .desktop file found
+        base = app_id.split(".")[-1] if "." in app_id else app_id
+        found = (base.replace("-", " ").replace("_", " ").strip().title() or app_id, None)
+    cache[app_id] = found
+    return found
 
 
 class Row(GObject.Object):
@@ -498,7 +561,6 @@ class ProcessesPage(MonitorPage):
         self.flat: dict = {}  # processes section: separate Row instances, reused per pass
         self.apps: dict[str, tuple[str, object] | None] = {}  # app id -> (name, gicon)
         self._dindex: dict | None = None
-        self._dindex_busy = False
         self._quit_timer = 0
         self._aligned = False
         self._gen = -1
@@ -532,10 +594,16 @@ class ProcessesPage(MonitorPage):
         for key, col in self.cols.items():
             col.set_visible(key not in hide)
 
+    def sort_by(self, key: str) -> None:
+        """Sort the table by one column, descending ("Open Processes" on the Memory
+        page sorts by Memory). The sorter's changed signal rebuilds too; the explicit
+        rebuild covers a no-op sort_by_column."""
+        self.cv.sort_by_column(self.cols[key], Gtk.SortType.DESCENDING)
+        self._rebuild(force=True)
+
     # -- visibility --------------------------------------------------------------------
     def on_shown(self) -> None:
         self._shown = True
-        self._warm_desktop_index()
         self.hub.want_processes(True)
         self._insp_resume()
         super().on_shown()
@@ -612,78 +680,13 @@ class ProcessesPage(MonitorPage):
 
     # -- data ---------------------------------------------------------------------------
     def _app_info(self, app_id: str, launched: bool = True):
-        """(name, icon) from the .desktop file; without one, only a unit that was itself
-        started as an app (app-*.scope/.service) counts, so session slices stay out."""
-        if app_id in self.apps:
-            found = self.apps[app_id]
-            return found if found is None or found[1] is not None or launched else None
-        found = None
-        nk = norm_app_key(app_id)
-        if nk in OWN_APP_KEYS:  # this app, whatever launcher or scope name started it
-            try:
-                info = Gio.DesktopAppInfo.new(OWN_APP_ID + ".desktop")
-            except TypeError:
-                info = None
-            found = (info.get_name() if info else "Asusius",
-                     info.get_icon() if info else Gio.ThemedIcon.new(OWN_APP_ID))
-            self.apps[app_id] = found
-            return found
-        for cand in (app_id, app_id.split(".")[-1] if "." in app_id else None,
-                     app_id.lower()):
-            if not cand:
-                continue
-            try:
-                info = Gio.DesktopAppInfo.new(cand + ".desktop")
-            except TypeError:
-                info = None
-            if info is not None:
-                found = (info.get_name(), info.get_icon())
-                break
-        if found is None:  # by StartupWMClass, executable name or a differently spelled id
-            info = self._desktop_index().get(nk)
-            if info is not None:
-                found = (info.get_name(), info.get_icon())
-        for d in ("/etc/xdg/autostart", os.path.expanduser("~/.config/autostart")):
-            if found is None and os.path.exists(f"{d}/{app_id}.desktop"):
-                info = Gio.DesktopAppInfo.new_from_filename(f"{d}/{app_id}.desktop")
-                if info is not None:
-                    found = (info.get_name(), info.get_icon())
-        if found is None and not launched:
-            return None
-        if found is None:  # launched as an app (systemd scope) but no .desktop file found
-            base = app_id.split(".")[-1] if "." in app_id else app_id
-            found = (base.replace("-", " ").replace("_", " ").strip().title() or app_id, None)
-        self.apps[app_id] = found
-        return found
-
-    def _warm_desktop_index(self) -> None:
-        """Pre-index installed .desktop entries off the main thread."""
-        if self._dindex is not None or self._dindex_busy:
-            return
-        self._dindex_busy = True
-
-        def build():
-            return desktop_index(
-                (info, info.get_id() or "", info.get_startup_wm_class(),
-                 info.get_string("Exec") or "")
-                for info in Gio.AppInfo.get_all()
-                if isinstance(info, Gio.DesktopAppInfo))
-
-        def done(idx):
-            self._dindex_busy = False
-            if self._dindex is None:
-                self._dindex = idx
-                self.apps.clear()
-                if self.hub.procs:
-                    self._rebuild(force=True)
-
-        run_bg(build, done=done, error=lambda _e: setattr(self, "_dindex_busy", False))
+        """(name, icon) from the .desktop file (app_display_info with this page's
+        memo and desktop index)."""
+        return app_display_info(app_id, launched, self.apps, self._desktop_index())
 
     def _desktop_index(self) -> dict:
-        """Return the cached desktop index, warming in background if not ready yet."""
         if self._dindex is None:
-            self._warm_desktop_index()
-            return {}
+            self._dindex = installed_desktop_index()
         return self._dindex
 
     def update(self) -> None:
@@ -719,25 +722,10 @@ class ProcessesPage(MonitorPage):
         procs = self.hub.procs
         q = self.search.get_text().strip().lower()
         keyf, desc = self._sort()
-        by_pid = {p.pid: p for p in procs}
         shown = [p for p in procs if not q or q in p.name.lower() or q in p.cmd.lower()
                  or q == str(p.pid)]
         # -- apps section: one group per application, the System pseudo-group last
-        groups: dict[str, list] = {}
-        own_pid = os.getpid()
-        for p in procs:
-            app = p.app
-            hops, cur = 0, p
-            while (cur.pid != own_pid and app is None and hops < 8
-                   and cur.ppid in by_pid and cur.ppid > 1):
-                cur = by_pid[cur.ppid]
-                app = cur.app
-                hops += 1
-            if cur.pid == own_pid:
-                app = OWN_APP_ID
-            if app is None:
-                continue
-            groups.setdefault(app, []).append(p)
+        groups = group_apps(procs, os.getpid(), OWN_APP_ID)
         app_rows: list[Row] = []
         assigned: set[int] = set()
         live: set = set()
