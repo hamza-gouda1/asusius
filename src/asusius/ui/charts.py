@@ -46,6 +46,7 @@ class Line:
     fill: bool = True
     dash: bool = False
     scale: float = 1.0  # value multiplier before plotting (e.g. bytes -> GiB)
+    pattern: tuple[float, ...] | None = None  # custom dash (extends dash=True's [4, 3])
 
 
 _FONT_OPTS = cairo.FontOptions()
@@ -92,7 +93,8 @@ class Chart(Gtk.DrawingArea):
                  y_fixed: tuple[float, float] | None = None, floor: float | None = 0.0,
                  min_span: float = 1.0, fmt=None, stacked: bool = False,
                  compact: bool = False, height: int = 120, use_max: bool = True,
-                 dense_grid: bool = False, monitor: bool = False) -> None:
+                 dense_grid: bool = False, monitor: bool = False, store=None,
+                 sample_interval: float | None = None, tooltip: bool = True) -> None:
         super().__init__()
         self.hub, self.lines = hub, lines
         self.window_s = window_s
@@ -100,6 +102,10 @@ class Chart(Gtk.DrawingArea):
         self.fmt = fmt or (lambda v: f"{v:g}")
         self.stacked, self.compact, self.use_max = stacked, compact, use_max
         self.dense_grid, self.monitor = dense_grid, monitor
+        # store=None keeps the shared hub ring; sample_interval=None keeps hub.interval_s
+        self.store = store
+        self.sample_interval = sample_interval
+        self.cursor_ts: float | None = None  # page-owned inspect cursor (see set_cursor_ts)
         self.set_content_height(height)
         self.set_hexpand(True)
         self.add_css_class("chart")
@@ -108,11 +114,39 @@ class Chart(Gtk.DrawingArea):
         self._ys: list[list[float]] = [[] for _ in lines]
         self.hover_x: float | None = None
         self._seen: tuple[float, float] | None = None  # axis range only ever widens
-        if not compact:
+        self._plot: tuple[float, float, float, float, float, float] | None = None
+        if not compact and tooltip:
             mo = Gtk.EventControllerMotion()
             mo.connect("motion", self._motion)
             mo.connect("leave", self._leave)
             self.add_controller(mo)
+
+    def set_lines(self, lines: list[Line]) -> None:
+        """Swap the drawn series (a view toggle); point buffers are rebuilt."""
+        self.lines = lines
+        self._xs = [[] for _ in lines]
+        self._ys = [[] for _ in lines]
+        self._seen = None
+        self.queue_draw()
+
+    def set_cursor_ts(self, ts: float | None) -> None:
+        """Draw a 1 px inspect cursor with per-line dot markers at `ts` (None clears)."""
+        if self.cursor_ts != ts:
+            self.cursor_ts = ts
+            self.queue_draw()
+
+    def ts_at_x(self, x: float) -> float | None:
+        """Timestamp under widget-space x, from the last drawn frame (None: never drawn)."""
+        if self._plot is None:
+            return None
+        gl, _gt, pw, _ph, t0, t1 = self._plot
+        if not pw or not gl <= x <= gl + pw:
+            return None
+        return t0 + (x - gl) / pw * (t1 - t0)
+
+    @staticmethod
+    def interval_of(hub, sample_interval: float | None) -> float:
+        return sample_interval if sample_interval is not None else hub.interval_s
 
     def _motion(self, _c, x, _y):
         self.hover_x = x
@@ -123,7 +157,8 @@ class Chart(Gtk.DrawingArea):
         self.queue_draw()
 
     def _draw(self, _area, cr, w, h):
-        store = self.hub.store
+        store = self.store if self.store is not None else self.hub.store
+        interval = self.interval_of(self.hub, self.sample_interval)
         dark = theme.is_dark()
         pal = theme.colours()
         layout = make_layout(cr)
@@ -131,7 +166,6 @@ class Chart(Gtk.DrawingArea):
         now = store.last_t
         t1 = now if now is not None else 0.0
         t0 = t1 - self.window_s
-        interval = self.hub.interval_s
         # collect points
         idx = store.index_range(t0 - interval) if now is not None else range(0)
         lo, hi = math.inf, -math.inf
@@ -168,6 +202,8 @@ class Chart(Gtk.DrawingArea):
         target = 3 if self.compact else max(3, min(6, int((h - 28) / 30)))
         if self.compact and self.dense_grid:
             target = 6  # dense compact cards split the same span finer
+        if self.y_fixed and math.isclose(hi, self.y_fixed[1], rel_tol=1e-7):
+            hi = self.y_fixed[1]  # float32 series can round slightly above capacity
         ymin, ymax, step = axis_span(self.y_fixed, self.floor, self.min_span, target, lo, hi,
                                      self._seen)
         if not self.y_fixed:  # same truthiness as the old inline check (None or ())
@@ -303,7 +339,9 @@ class Chart(Gtk.DrawingArea):
                 cr.set_line_width(1.6 if self.compact else 1.8)
                 cr.set_line_join(cairo.LINE_JOIN_ROUND)
                 cr.set_line_cap(cairo.LINE_CAP_ROUND)
-                if line.dash:
+                if line.pattern:
+                    cr.set_dash(list(line.pattern))
+                elif line.dash:
                     cr.set_dash([4, 3])
                 cr.stroke()
                 cr.set_dash([])
@@ -316,22 +354,49 @@ class Chart(Gtk.DrawingArea):
                 cr.set_source_rgb(*colour(self.lines[0].color))
                 cr.arc(min(x, gl + pw - 2.5), y, 2.8, 0, 2 * math.pi)
                 cr.fill()
+        self._plot = (gl, gt, pw, ph, t0, t1)
+        if self.cursor_ts is not None and now is not None:
+            self._draw_cursor(cr, store, gl, gt, pw, ph, t0, px_y, interval, pal)
         if self.hover_x is not None and not self.compact and now is not None:
-            self._draw_hover(cr, layout, store, gl, gt, pw, ph, t0, px_y, pal)
+            self._draw_hover(cr, layout, store, gl, gt, pw, ph, t0, px_y, pal, interval)
 
-    def _draw_hover(self, cr, layout, store, gl, gt, pw, ph, t0, px_y, pal):
+    def _draw_cursor(self, cr, store, gl, gt, pw, ph, t0, px_y, interval, pal):
+        """The page's inspect cursor: a 1 px vertical line plus a dot per line."""
+        ts = self.cursor_ts
+        if ts < t0 - 1e-6 or ts > t0 + self.window_s + 1e-6:
+            return  # pinned outside the visible range: the readout strip still shows it
+        x = round(gl + (ts - t0) / self.window_s * pw) + 0.5
+        cr.set_source_rgba(*pal["dim"][:3], 0.55)
+        cr.set_line_width(1)
+        cr.move_to(x, gt)
+        cr.line_to(x, gt + ph)
+        cr.stroke()
+        cumulative = 0.0
+        for line in self.lines:
+            v = value_at(store, line.key, ts, interval)
+            if v is None:
+                continue
+            val = v * line.scale
+            if self.stacked:
+                cumulative += val
+                val = cumulative
+            cr.set_source_rgb(*colour(line.color))
+            cr.arc(x, px_y(val), 2.8, 0, 2 * math.pi)
+            cr.fill()
+
+    def _draw_hover(self, cr, layout, store, gl, gt, pw, ph, t0, px_y, pal, interval):
         x = min(max(self.hover_x, gl), gl + pw)
         t = t0 + (x - gl) / pw * self.window_s
         # nearest sample
         best, best_d = None, math.inf
-        for k in store.index_range(t - 3 * self.hub.interval_s):
+        for k in store.index_range(t - 3 * interval):
             s = store.slot(k)
             d = abs(store.times[s] - t)
             if d < best_d:
                 best, best_d = s, d
             elif store.times[s] > t:
                 break
-        if best is None or best_d > 2 * self.hub.interval_s:
+        if best is None or best_d > 2 * interval:
             return
         sx = gl + (store.times[best] - t0) / self.window_s * pw
         cr.set_source_rgba(*pal["dim"][:3], 0.5)
@@ -358,6 +423,30 @@ class Chart(Gtk.DrawingArea):
         cr.set_source_rgba(*pal["dim"][:3], 1.0)
         cr.move_to(bx + 6, by + 4)
         PangoCairo.show_layout(cr, layout)
+
+
+def value_at(store, key: str, ts: float | None, interval: float) -> float | None:
+    """The ring value nearest `ts` (None: no key, empty ring, gap or too far away).
+
+    NaN samples (a source that could not be read) come back as None so a readout
+    never interpolates across a gap and never shows a fabricated zero.
+    """
+    arr = store.series.get(key) if store is not None else None
+    if ts is None or arr is None or not store.count:
+        return None
+    best, best_d = None, math.inf
+    for k in store.index_range(ts - 2.0 * interval):
+        s = store.slot(k)
+        t = store.times[s]
+        if t > ts + interval:
+            break
+        d = abs(t - ts)
+        if d < best_d:
+            best, best_d = s, d
+    if best is None or best_d > interval:
+        return None
+    v = arr[best]
+    return None if v != v else float(v)
 
 
 def _round_rect(cr, x, y, w, h, r):
