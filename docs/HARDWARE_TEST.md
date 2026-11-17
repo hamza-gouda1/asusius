@@ -7,6 +7,9 @@ Close the simulated demo and open the installed app for these checks. Confirm th
 version in **About** is 0.3.0. In the collection terminal,
 `echo "${ASUSIUS_FAKE_ROOT:-}"` should print a blank line. If it prints a path, open
 a terminal outside the demo environment before collecting readings.
+Confirm the installed app itself does not show **Fake hardware (safe)** in its sidebar;
+if it does, close it and relaunch the installed app outside the demo environment before
+recording observations.
 
 ## Minutes 0–3 — save the baseline
 
