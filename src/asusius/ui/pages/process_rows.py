@@ -8,16 +8,6 @@ from gi.repository import Gio, GObject, Gtk
 from ...telemetry import fmt
 from ..viewmodels import OWN_APP_ID, OWN_APP_KEYS, desktop_index, norm_app_key
 
-COLUMNS = [  # key, title, width chars, tooltip
-    ("name", "Name", 0, None),
-    ("pid", "PID", 6, None),
-    ("cpu", "CPU", 6, "Share of the whole processor (all logical CPUs = 100 %)"),
-    ("mem", "Memory", 8, "Private memory: resident minus shared pages (statm)"),
-    ("swap", "Swap", 8, "Swapped-out memory of the process (VmSwap in /proc/PID/status)"),
-    ("disk", "Drive", 9, "Read + write at the storage layer, per second (your processes only)"),
-    ("gpu", "GPU", 5, "Busiest engine on the iGPU (DRM fdinfo) or dGPU"),
-    ("vram", "GPU memory", 9, "dGPU memory"),
-]
 SORT_KEYS = {
     "name": lambda r: r.name.lower(),
     "pid": lambda r: r.pid or 0,
@@ -45,15 +35,6 @@ MEMORY_ROWS = (("rss", "Resident"), ("hwm", "Peak"), ("private", "Private"),
 VAL_MAX_CHARS = 26  # value labels cap their natural width so the dialog stays shrinkable
 _VAL_START_ELLIPSIZE = {"cgroup"}  # paths read tail-first: keep the leaf unit visible
 
-
-def _attach_header_tooltip(header) -> None:
-    """Attach the explanatory column text to its visible title label."""
-    title = header.get_text().split("\n")[0]
-    for _key, column_title, _chars, tip in COLUMNS:
-        if column_title == title:
-            if tip:
-                header.set_tooltip_text(tip)
-            return
 
 def totals_for(procs) -> dict[str, str]:
     """Header second lines: sums over the displayed process set.

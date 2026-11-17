@@ -19,7 +19,6 @@ from .monitor_base import MonitorPage, set_text
 from .process_inspector import InspectorDialog, _fit_val, _HAS_ADW_DIALOG, _DIALOG_BASE
 from .process_rows import (
     CHANGED_TEXT,
-    COLUMNS,
     EXITED_TEXT,
     INFO_ROWS,
     INSPECT_MS,
@@ -30,12 +29,35 @@ from .process_rows import (
     SYSTEM_KEY,
     VAL_MAX_CHARS,
     Row,
-    _attach_header_tooltip,
     _sum_opt,
     app_display_info,
     installed_desktop_index,
     totals_for,
 )
+
+
+COLUMNS = [  # key, title, width chars, tooltip
+    ("name", "Name", 0, None),
+    ("pid", "PID", 6, None),
+    ("cpu", "CPU", 6, "Share of the whole processor (all logical CPUs = 100 %)"),
+    ("mem", "Memory", 8, "Private memory: resident minus shared pages (statm)"),
+    ("swap", "Swap", 8, "Swapped-out memory of the process (VmSwap in /proc/PID/status)"),
+    ("disk", "Drive", 9, "Read + write at the storage layer, per second (your processes only)"),
+    ("gpu", "GPU", 5, "Busiest engine on the iGPU (DRM fdinfo) or dGPU"),
+    ("vram", "GPU memory", 9, "dGPU memory"),
+]
+
+
+
+def _attach_header_tooltip(header) -> None:
+    """Attach the explanatory column text to its visible title label."""
+    title = header.get_text().split("\n")[0]
+    for _key, column_title, _chars, tip in COLUMNS:
+        if column_title == title:
+            if tip:
+                header.set_tooltip_text(tip)
+            return
+
 
 
 def _ancestors(w):
