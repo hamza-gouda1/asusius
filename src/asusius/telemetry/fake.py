@@ -27,6 +27,16 @@ GIB = 1 << 30
 MEM_TOTAL = 16 * GIB - 420 * (1 << 20)
 ZRAM_TABLE_BYTES = 64 * PAGE  # zram0's fixed table overhead on top of the compressed pool
 
+# Memory-narrative fixtures (contract §4): deterministic functions of absolute `now`,
+# raw vmstat counters integrating by dt like the other counters.
+SUSPEND_DT = 30.0        # advance() jumps wider than this freeze the vmstat counters
+FILE_RISE_RATE = 6 * (1 << 20)   # file-rise: file-cache growth, bytes/s
+ANON_RISE_RATE = 9 * (1 << 20)   # anon-rise: anonymous-memory growth, bytes/s
+SWAP_OUT_PAGES_S = 1200.0        # anon-rise: pswpout pages/s once pressure is full
+GROWTH_PER_S = 0.005             # growing_pid: private-memory factor per s of world time
+VMSTAT_RESET_STEP = 500          # vmstat_reset: counter decrease between advances
+VMSTAT_RESET_FLOOR = 100_000     # vmstat_reset: counters start here, then decrease
+
 # ---- disk analyzer demo tree (pages + tests; deterministic sizes) ----------------
 # FAKE_HOME stands in for the "/home" filesystem: a page points scan_path() at
 # <root>/FAKE_HOME and gets the same tree on every run. Files listed as sparse are
@@ -296,11 +306,68 @@ def ensure(root: str | Path) -> None:
 
 
 class FakeWorld:
-    """Integrates fake load into monotonic counters (jiffies, sectors, bytes, ns)."""
+    """Integrates fake load into monotonic counters (jiffies, sectors, bytes, ns).
 
-    def __init__(self, root: str | Path) -> None:
+    `mode` selects a memory narrative (contract §4); the default mode reproduces
+    today's fixture byte-for-byte and never writes /proc/vmstat. Narrative shapes
+    are deterministic functions of world time (self.elapsed, accumulated from the
+    first advance() call — QA clocks may start anywhere); raw counters integrate
+    by dt. Degenerate knobs compose with any mode:
+
+    - psi=False: no /proc/pressure/memory file at all
+    - swap=False: zero configured swap, reported explicitly
+    - swap_frozen: vmstat counters present but never advance (zero traffic)
+    - vmstat_reset: vmstat counters decrease between advances
+    - suspend gap: call advance(now) with a jumped now; counters freeze across it
+    - mem_missing/mem_bad: named meminfo lines dropped / written malformed
+      (e.g. mem_missing=("MemAvailable",))
+    - partial_statm_pid: that pid's statm is absent (unreadable -> RSS fallback)
+    - restart_pid/restart_after: the pid restarts (same PID, new start time) once
+      `restart_after` seconds of world time have elapsed
+    - growing_pid: that pid's private memory ramps over the first ~5 min of world
+      time, relative to the first advance() call after construction
+    - long_label_pid: that pid's cgroup carries an overlong app label
+    - perf_pids: deterministic ~n-PID perf fixture for measure.py A/B runs
+      (never enabled by default QA)
+    """
+
+    def __init__(self, root: str | Path, mode: str = "default", *, psi: bool = True,
+                 swap: bool = True, vmstat: bool | None = None,
+                 swap_frozen: bool = False, vmstat_reset: bool = False,
+                 perf_pids: int = 0, mem_missing: tuple[str, ...] = (),
+                 mem_bad: tuple[str, ...] = (), partial_statm_pid: int | None = None,
+                 restart_pid: int | None = None, restart_after: float = 6.0,
+                 growing_pid: int | None = None,
+                 long_label_pid: int | None = None) -> None:
+        if mode not in ("default", "file-rise", "anon-rise"):
+            raise ValueError(f"unknown FakeWorld mode {mode!r}")
         self.root = Path(root)
         ensure(self.root)
+        self.mode = mode
+        self.psi_on = psi
+        self.swap_on = swap
+        self.swap_frozen = swap_frozen
+        self.vmstat_reset = vmstat_reset
+        self.mem_missing = tuple(mem_missing)
+        self.mem_bad = tuple(mem_bad)
+        self.partial_statm_pid = partial_statm_pid
+        self.restart_pid = restart_pid
+        self.restart_after = restart_after
+        self.restarted = False
+        self.growing_pid = growing_pid
+        self.elapsed = 0.0  # world time, for the restart knob
+        # raw vmstat page counters; reset starts high so it can decrease each advance
+        self.pswpin = self.pswpout = VMSTAT_RESET_FLOOR if vmstat_reset else 0
+        if vmstat is None:
+            vmstat = mode != "default" or swap_frozen or vmstat_reset
+        self.vmstat_on = vmstat
+        self.pswpin_rate = 0.0 if mode != "default" else 30.0
+        if not psi:
+            (self.root / "proc/pressure/memory").unlink(missing_ok=True)
+        if long_label_pid is not None:
+            _w(self.root / f"proc/{long_label_pid}/cgroup",
+               "0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+               f"app-gnome-com.overlong.{'label' * 30}-{long_label_pid}.scope")
         self.t: float | None = None
         self.cpu = [[0] * 8 for _ in range(NCPU)]  # user nice system idle iowait irq soft st
         self.ctxt = self.intr = 0
@@ -312,6 +379,34 @@ class FakeWorld:
         self.render_ns = {p[0]: 0 for p in PROCS}
         self.rc6_ms = 0
         self.uptime = 18_450.0
+        self.perf_pids: list[int] = []
+        if perf_pids:
+            self._make_perf_procs(perf_pids)
+
+    def _make_perf_procs(self, n: int) -> None:
+        """Deterministic ~n-PID perf fixture (measure.py A/B; default QA never sets it).
+
+        PIDs 20000+ form 12 app scopes with distinct, stable per-app footprints:
+        member i of app i%12 is sized 12 + 2*(i%12) MiB plus (i//12%5)*2 MiB of
+        member variation, so per-app totals strictly increase with the app index
+        (~0.8-1.9 GiB per app at the 600-PID A/B scale, no collisions) and never
+        saturate. Per-tick files advance by dt exactly like the PROCS fixture.
+        """
+        r = self.root
+        for i in range(n):
+            pid = 20000 + i
+            self.perf_pids.append(pid)
+            d = r / "proc" / str(pid)
+            d.mkdir(parents=True, exist_ok=True)
+            cmd = f"/usr/bin/perf-{i % 12} --slot {i}"
+            (d / "cmdline").write_bytes(cmd.replace(" ", "\0").encode() + b"\0")
+            _w(d / "cgroup",
+               "0::/user.slice/user-1000.slice/user@1000.service/app.slice/"
+               f"app-gnome-org.perf.App{i % 12}-{pid}.scope")
+            (d / "fd").mkdir(exist_ok=True)
+            (d / "fdinfo").mkdir(exist_ok=True)
+            self.proc_ticks[pid] = 0
+            self.proc_io[pid] = [0, 0]
 
     def advance(self, now: float) -> None:
         if self.t is None:
@@ -319,6 +414,11 @@ class FakeWorld:
         dt = max(0.0, now - self.t)
         self.t = now
         self.uptime += dt
+        self.elapsed += dt
+        if (self.restart_pid is not None and not self.restarted
+                and self.elapsed >= self.restart_after):
+            self.restarted = True
+            self.proc_ticks[self.restart_pid] = 0  # a restarted process starts fresh
         L = load_at(now)
         r = self.root
         lines = []
@@ -353,19 +453,11 @@ class FakeWorld:
             _w(hw / f"temp{n}_input", int((pkg - 6 + 5 * math.sin(n + now / 7)) * 1000))
         _w(r / "sys/class/hwmon/hwmon8/fan1_input", int(2600 + 3200 * L))
         _w(r / "sys/class/hwmon/hwmon8/fan2_input", int(2300 + 3000 * L))
-        used = int(MEM_TOTAL * (0.48 + 0.22 * L))
-        free = int(MEM_TOTAL * 0.09)
-        cached = MEM_TOTAL - used - free
-        kb = 1024
-        (r / "proc/meminfo").write_text(
-            f"MemTotal: {MEM_TOTAL // kb} kB\nMemFree: {free // kb} kB\n"
-            f"MemAvailable: {(free + cached) // kb} kB\nBuffers: {180 << 10} kB\n"
-            f"Cached: {(cached - (500 << 20)) // kb} kB\nSwapCached: {72 << 10} kB\n"
-            f"Shmem: {1300 << 10} kB\nSReclaimable: {320 << 10} kB\nSUnreclaim: {210 << 10} kB\n"
-            f"Dirty: {int(2 + 30 * L) << 10} kB\nWriteback: 0 kB\nAnonPages: {used // kb} kB\n"
-            f"Mapped: {900 << 10} kB\nSwapTotal: {4 << 20} kB\n"
-            f"SwapFree: {int((4 << 20) * (0.62 - 0.05 * L))} kB\nZswap: 0 kB\nZswapped: 0 kB\n"
-            f"CommitLimit: {12 << 20} kB\nCommitted_AS: {int((14 + 6 * L) * (1 << 20))} kB\n")
+        (r / "proc/meminfo").write_text(self._meminfo_text(L))
+        if self.vmstat_on:
+            self._write_vmstat(now, dt)
+        if self.mode != "default":
+            self._write_psi()
         # zram pool tracks the workload (orig ≈ (0.5+2.5·L) GiB, ~4× compression,
         # mem_used_total ≈ pool + table overhead); zram1 stays a measured zero
         zorig = int((0.5 + 2.5 * L) * GIB)
@@ -416,12 +508,19 @@ class FakeWorld:
             ticks = self.proc_ticks[pid]
             pd = r / "proc" / str(pid)
             rss = int(mem * (1 << 20) * (1 + (0.1 * L if pid == 3488 else 0)) / PAGE)
+            if pid == self.growing_pid:
+                # Ramped on world time accumulated from the first advance() call, not
+                # on absolute now: QA clocks may start anywhere, so an absolute-now
+                # ramp would already be saturated on the first tick.
+                rss = int(rss * (1 + min(1.5, self.elapsed * GROWTH_PER_S)))
+            start = 9000 + pid if self.restarted and pid == self.restart_pid else 1000 + pid
             (pd / "stat").write_text(
                 f"{pid} ({comm}) S {ppid} {pid} {pid} 0 -1 4194560 0 0 0 0 {ticks * 3 // 4} "
-                f"{ticks // 4} 0 0 20 0 {6 if rss else 1} 0 {1000 + pid} 0 {rss} "
+                f"{ticks // 4} 0 0 20 0 {6 if rss else 1} 0 {start} 0 {rss} "
                 "18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 3 0 0 0 0 0\n")
             shared = rss // 6
-            (pd / "statm").write_text(f"{rss * 3} {rss + shared} {shared} 10 0 {rss} 0\n")
+            if pid != self.partial_statm_pid:  # absent statm: unreadable -> RSS fallback
+                (pd / "statm").write_text(f"{rss * 3} {rss + shared} {shared} 10 0 {rss} 0\n")
             io = self.proc_io[pid]
             if pid in (3488, 2610, 2101):
                 io[0] += int(dt * L * (9e6 if pid == 3488 else 2e5))
@@ -442,6 +541,26 @@ class FakeWorld:
                     f"drm-engine-copy:\t{self.render_ns[pid] // 50} ns\n"
                     f"drm-engine-video:\t{self.render_ns[pid] // 9 if pid == 2170 else 0} ns\n"
                     "drm-engine-video-enhance:\t0 ns\n")
+        for i, pid in enumerate(self.perf_pids):
+            self.proc_ticks[pid] += int(dt * CLK * (0.2 + (i % 5) * 0.3) / 100 + 0.5)
+            ticks = self.proc_ticks[pid]
+            pd = r / "proc" / str(pid)
+            mem_kb = (12 + (i % 12) * 2 + (i // 12 % 5) * 2) << 10
+            rss = int(mem_kb * 1024 / PAGE)
+            io = self.proc_io[pid]
+            io[0] += int(dt * 5e4)
+            io[1] += int(dt * 2e4)
+            (pd / "stat").write_text(
+                f"{pid} (perf-{i % 12}) S 2101 {pid} {pid} 0 -1 4194560 0 0 0 0 "
+                f"{ticks * 3 // 4} {ticks // 4} 0 0 20 0 4 0 {1000 + pid} 0 {rss} "
+                "18446744073709551615 0 0 0 0 0 0 0 0 0 0 0 0 17 3 0 0 0 0 0\n")
+            shared = rss // 8
+            (pd / "statm").write_text(f"{rss * 3} {rss + shared} {shared} 10 0 {rss} 0\n")
+            (pd / "status").write_text(
+                f"Name:\tperf-{i % 12}\nVmRSS:\t{rss * PAGE // 1024} kB\n"
+                f"VmSwap:\t{mem_kb // 3} kB\n")
+            (pd / "io").write_text(f"rchar: {io[0]}\nwchar: {io[1]}\nread_bytes: {io[0]}\n"
+                                   f"write_bytes: {io[1]}\n")
         _w(r / "sys/class/power_supply/BAT0/power_now", int((14 + 46 * L) * 1e6))
         vram = int((2.1 + 3.6 * L) * GIB)
         (r / "fake/nvml.json").write_text(json.dumps({
@@ -457,6 +576,134 @@ class FakeWorld:
             "procs": {"3488": {"type": "C+G", "vram": vram - (380 << 20),
                                "sm": round(100 * game_dgpu)},
                       "1460": {"type": "G", "vram": 2 << 20, "sm": None}}}))
+
+    # -- memory narratives and degenerate fixtures (contract §4) -----------------------
+
+    def _meminfo_text(self, L: float) -> str:
+        """Deterministic meminfo for the current mode and knobs.
+
+        The default mode reproduces today's fixture line-for-line (no Active(file)/
+        Inactive(file), so the Memory page's file line shows a permanent gap there —
+        accepted). Narratives add the lines their story needs; their levels and
+        ramps are functions of world time (self.elapsed, accumulated from the first
+        advance() call — QA clocks may start anywhere, so an absolute-now ramp
+        would already be saturated on the first tick), clamped into [floor,
+        MemTotal].
+        """
+        kb = 1024
+        t = self.elapsed
+        if self.mode == "file-rise":
+            # File cache rises steadily while Available stays within a few hundred
+            # kB, anon is flat and swap stays quiet: a pure cache-absorption story.
+            anon_b = int(6.0 * GIB + 20 * (1 << 20) * math.sin(t / 11.0))
+            file_b = int(min(8.5 * GIB, 2.0 * GIB + FILE_RISE_RATE * t))
+            avail_b = int(min(MEM_TOTAL, max(512 << 20, 7.0 * GIB
+                                             + 100 * kb * math.sin(t / 7.0)
+                                             + 50 * kb * math.sin(t / 3.7))))
+            free_b = int(min(MEM_TOTAL, max(256 << 20,
+                                            1.2 * GIB - FILE_RISE_RATE * t / 3)))
+        elif self.mode == "anon-rise":
+            # Anonymous memory rises and depletes Available; pressure climbs and
+            # swap-out starts (SwapFree drops by the pages already written out).
+            anon_b = int(min(13.5 * GIB, 6.0 * GIB + ANON_RISE_RATE * t))
+            file_b = int(min(MEM_TOTAL, max(1.2 * GIB,
+                                            2.2 * GIB - ANON_RISE_RATE * t / 4)))
+            avail_b = int(min(MEM_TOTAL, max(512 << 20,
+                                             7.0 * GIB - ANON_RISE_RATE * t)))
+            free_b = int(min(MEM_TOTAL, max(200 << 20,
+                                            1.2 * GIB - ANON_RISE_RATE * t / 2)))
+        else:
+            anon_b = int(MEM_TOTAL * (0.48 + 0.22 * L))
+            file_b = avail_b = 0  # default: Available stays free + cached, as today
+            free_b = int(MEM_TOTAL * 0.09)
+        cached_b = MEM_TOTAL - anon_b - free_b
+        # meminfo is kB: SwapFree drops by the pages already written out (anon-rise),
+        # clamped at a full swap partition
+        swap_free_kb = (max(0, int((4 << 20) * 0.62 - self.pswpout * PAGE // 1024))
+                        if self.mode == "anon-rise"
+                        else int((4 << 20) * (0.62 - 0.05 * L)))
+        lines = [f"MemTotal: {MEM_TOTAL // kb} kB", f"MemFree: {free_b // kb} kB"]
+        lines.append(f"MemAvailable: {(avail_b if self.mode != 'default'
+                                      else free_b + cached_b) // kb} kB")
+        lines += [
+            f"Buffers: {180 << 10} kB",
+            f"Cached: {(cached_b - (500 << 20)) // kb} kB",
+            f"SwapCached: {72 << 10} kB",
+            f"Shmem: {1300 << 10} kB",
+            f"SReclaimable: {320 << 10} kB",
+            f"SUnreclaim: {210 << 10} kB",
+            f"Dirty: {int(2 + 30 * L) << 10} kB",
+            "Writeback: 0 kB",
+            f"AnonPages: {anon_b // kb} kB",
+            f"Mapped: {900 << 10} kB",
+        ]
+        if self.mode != "default":
+            lines += [
+                f"Active(file): {int(file_b * 0.6) // kb} kB",
+                f"Inactive(file): {int(file_b * 0.4) // kb} kB",
+            ]
+        lines += [
+            f"SwapTotal: {4 << 20} kB",
+            f"SwapFree: {swap_free_kb} kB",
+            "Zswap: 0 kB",
+            "Zswapped: 0 kB",
+            f"CommitLimit: {12 << 20} kB",
+            f"Committed_AS: {int((14 + 6 * L) * (1 << 20))} kB",
+        ]
+        drop = set(self.mem_missing)
+        out = []
+        for ln in lines:
+            key = ln.partition(":")[0]
+            if key in drop:
+                continue
+            if not self.swap_on and key in ("SwapTotal", "SwapFree"):
+                ln = f"{key}: 0 kB"
+            out.append(f"{key}: {key}-malformed kB" if key in self.mem_bad else ln)
+        return "\n".join(out) + "\n"
+
+    def _write_vmstat(self, now: float, dt: float) -> None:
+        """/proc/vmstat with pswpin/pswpout page counters integrated by dt.
+
+        Counters freeze across a suspend-sized jump (dt > SUSPEND_DT) and whenever
+        the zero-traffic knob is set; vmstat_reset makes them decrease instead.
+        """
+        if self.vmstat_reset:
+            self.pswpin = max(0, self.pswpin - VMSTAT_RESET_STEP)
+            self.pswpout = max(0, self.pswpout - VMSTAT_RESET_STEP)
+        elif dt <= SUSPEND_DT and not self.swap_frozen:
+            self.pswpin += int(dt * self.pswpin_rate)
+            self.pswpout += int(dt * self._pswpout_rate())
+        _w(self.root / "proc/vmstat",
+           f"nr_free_pages {int(600 * (1 + math.sin(now / 21.0)))}\n"
+           f"pgscan_kswapd {int(self.uptime * 37)}\npgsteal_kswapd {int(self.uptime * 31)}\n"
+           f"pgfault {int(self.uptime * 90000)}\npgmajfault {int(self.uptime * 700)}\n"
+           f"pswpin {self.pswpin}\npswpout {self.pswpout}\n"
+           f"pgpgin {self.pswpin * 2}\npgpgout {self.pswpout * 2}\n")
+
+    def _pswpout_rate(self) -> float:
+        """pswpout pages/s: ramping for anon-rise, zero for file-rise, mild idle else.
+
+        The ramp is a function of world time (self.elapsed), never absolute now.
+        """
+        if self.mode == "anon-rise":
+            return SWAP_OUT_PAGES_S * min(1.0, self.elapsed / 300.0)
+        return 0.0 if self.mode == "file-rise" else 60.0
+
+    def _write_psi(self) -> None:
+        """/proc/pressure/memory as a function of world time (narratives)."""
+        if not self.psi_on:
+            return
+        t = self.elapsed
+        if self.mode == "file-rise":
+            some, full = 0.02 + 0.02 * math.sin(t / 9.0), 0.0
+        else:  # anon-rise: some climbs to ~4 %, full to ~1 % over the first ~5 min
+            p = min(1.0, t / 300.0)
+            some, full = 0.05 + 3.95 * p, 0.1 + 0.8 * p
+        _w(self.root / "proc/pressure/memory",
+           f"some avg10={some:.2f} avg60={some / 2:.2f} avg300={some / 4:.2f} "
+           f"total={int(some * t * 1e4)}\n"
+           f"full avg10={full:.2f} avg60={full / 2:.2f} avg300={full / 4:.2f} "
+           f"total={int(full * t * 1e4)}\n")
 
 
 # ---- fake UPower (tests and QA; injected into ui.live.LiveHub via upower=) ----------

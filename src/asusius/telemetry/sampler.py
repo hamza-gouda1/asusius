@@ -15,6 +15,7 @@ from .gpu_amd import AmdDiscreteGpu, AmdGpu, find_amd_cards
 from .gpu_intel import IntelGpu
 from .gpu_nvidia import NvidiaGpu
 from .memory import MemoryReader
+from .memory_history import MemHistory
 from .network import Network
 from .power import Power
 from .ring import Store
@@ -29,6 +30,7 @@ class Sampler:
         self.store = Store(capacity)
         self.cpu = CpuReader(root)
         self.mem = MemoryReader(root)
+        self.mem_history = MemHistory()
         self.sensors = Sensors(root)
         intel = IntelGpu(root)
         nv = NvidiaGpu(root, fake=fake)
@@ -76,6 +78,7 @@ class Sampler:
     def commit(self, now: float, vals: dict, info: dict) -> None:
         self.store.push(now, vals)
         self.info = info
+        self.mem_history.commit(now, info.get("mem") or {})
 
     def sample(self, now: float | None = None) -> dict:
         """collect + commit in one go (tests, validation, CLI)."""

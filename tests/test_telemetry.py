@@ -6,13 +6,15 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from asusius.backends.fake import build_fake_tree
 from asusius.telemetry import Sampler, Store, fmt
 from asusius.telemetry.cpu import parse_cpulist, parse_loadavg, parse_stat, usage
 from asusius.telemetry.gpu_intel import DrmClients, parse_fdinfo
 from asusius.telemetry.gpu_nvidia import NvidiaGpu, parse_smi
-from asusius.telemetry.memory import derive, parse_meminfo, parse_psi
+from asusius.telemetry.memory import (PSI_MISSING, MemoryReader, derive, parse_meminfo,
+                                      parse_mm_stat, parse_psi)
 from asusius.telemetry.network import parse_net_dev, parse_wireless
 from asusius.telemetry.procs import app_from_cgroup, parse_io, parse_pid_stat
 from asusius.telemetry.storage import disk_rates, parse_diskstats, parse_mounts
@@ -76,6 +78,332 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(p["some"]["avg10"], 1.5)
         self.assertEqual(p["full"]["total"], 5)
         self.assertIsNone(parse_psi(None))
+
+    def test_parse_meminfo_tolerant(self):
+        mi = parse_meminfo(b"MemTotal: 100 kB\nBad: xyz kB\nMemFree: 50 kB\n"
+                           b"HugePages_Total: 0\n\nJunk\nSwapTotal: 10 kB\n")
+        # one malformed line leaves that field absent; the others still parse
+        self.assertEqual(mi, {"MemTotal": 100 * 1024, "MemFree": 50 * 1024,
+                              "HugePages_Total": 0, "SwapTotal": 10 * 1024})
+
+    def test_derive_v2_validity(self):
+        d = derive({})
+        for key in ("total", "free", "available", "in_use", "reclaimable", "file",
+                    "slab", "page_tables", "kernel_stack"):
+            self.assertIsNone(d[key], key)  # absent sources stay None, never zeros
+        self.assertEqual((d["swap_total"], d["swap_used"], d["anon"]), (0, 0, 0))
+        d = derive({"MemTotal": 1000, "MemFree": 400})
+        self.assertIsNone(d["available"])  # no free-fallback for the estimate
+        self.assertIsNone(d["in_use"])
+        self.assertIsNone(d["reclaimable"])
+        self.assertEqual(d["free"], 400)
+        d = derive({"MemTotal": 1000, "MemFree": 400, "MemAvailable": 700})
+        self.assertEqual((d["in_use"], d["reclaimable"], d["available"]), (300, 300, 700))
+        d = derive({"MemTotal": 1000, "MemFree": 2000, "MemAvailable": 1500})
+        self.assertEqual((d["free"], d["available"], d["in_use"]), (1000, 1000, 0))
+
+    def test_derive_available_below_free(self):
+        d = derive({"MemTotal": 1000, "MemFree": 900, "MemAvailable": 300})
+        self.assertEqual(d["in_use"], 700)  # the estimate stays total - available
+        self.assertEqual(d["reclaimable"], 0)  # clamped; the old identity may break
+
+    def test_derive_new_series_keys(self):
+        d = derive({"Active(file)": 100, "Inactive(file)": 50, "Shmem": 999})
+        self.assertEqual(d["file"], 150)  # file-backed LRU only, never Shmem
+        self.assertIsNone(derive({"Active(file)": 100})["file"])
+        self.assertEqual(derive({"Slab": 500})["slab"], 500)
+        self.assertEqual(derive({"SReclaimable": 300, "SUnreclaim": 200})["slab"], 500)
+        self.assertIsNone(derive({"SReclaimable": 300})["slab"])
+        # KReclaimable includes SReclaimable and is never added to the slab figures
+        self.assertEqual(derive({"KReclaimable": 999, "SReclaimable": 300,
+                                 "SUnreclaim": 200})["slab"], 500)
+        d = derive({"PageTables": 123, "KernelStack": 45})
+        self.assertEqual((d["page_tables"], d["kernel_stack"]), (123, 45))
+        self.assertIsNone(derive({})["page_tables"])
+        self.assertIsNone(derive({})["kernel_stack"])
+
+    def test_swap_states(self):
+        self.assertEqual(derive({"SwapTotal": 100, "SwapFree": 40})["swap_used"], 60)
+        self.assertEqual(derive({"SwapTotal": 0, "SwapFree": 0})["swap_used"], 0)
+        self.assertEqual(derive({"SwapTotal": 10, "SwapFree": 50})["swap_used"], 0)
+        # absent lines (no-swap meminfo) keep the legacy 0-defaults, never negative
+        self.assertEqual((derive({})["swap_total"], derive({})["swap_used"]), (0, 0))
+
+    def test_parse_psi_tolerant(self):
+        p = parse_psi("some avg10=1.5 avg60=oops avg300=0.4 total=7\n"
+                      "notaline\nfull avg10=0.25\n")
+        self.assertEqual(p["some"], {"avg10": 1.5, "avg300": 0.4, "total": 7.0})
+        self.assertNotIn("notaline", p)  # a line with no parsable entries is dropped
+        self.assertEqual(p["full"], {"avg10": 0.25})
+        self.assertEqual(parse_psi("full avg10=1.0"), {"full": {"avg10": 1.0}})
+        self.assertIsNone(parse_psi(None))
+
+    def test_nonfinite_and_negative_psi_counters_are_ignored(self):
+        self.assertEqual(parse_psi("some avg10=inf avg60=0.01 avg300=-1 total=nan"),
+                         {"some": {"avg60": 0.01}})
+
+    def test_memory_view_distinguishes_unknown_swap_from_zero_capacity(self):
+        for fields, total, used in (
+                ({"SwapTotal": 100}, 100, None),
+                ({"SwapFree": 40}, None, None),
+                ({"SwapTotal": 0, "SwapFree": 0}, 0, 0),
+                ({"SwapTotal": 100, "SwapFree": 40}, 100, 60)):
+            d = derive(fields)
+            self.assertEqual((d["swap_capacity_bytes"], d["swap_used_bytes"]),
+                             (total, used))
+
+    def test_parse_mm_stat_unchanged(self):
+        self.assertEqual(parse_mm_stat("100 25 30 0 0 0 0 0"), (100, 25, 30))
+        self.assertEqual(parse_mm_stat("100 25"), (100, 25, None))
+        self.assertEqual(parse_mm_stat("x -5 30"), (None, None, 30))
+        for text in ("", None, "x y z"):
+            self.assertIsNone(parse_mm_stat(text))
+
+
+class MemoryReaderTests(unittest.TestCase):
+    """Reader-level memory tests: PSI absence, vmstat gating and counter parsing."""
+
+    def _tree(self, root: Path, *, psi: str | None = "valid", vmstat: str | None = None,
+              meminfo: bytes = (b"MemTotal: 1000 kB\nMemFree: 400 kB\n"
+                                b"MemAvailable: 700 kB\nAnonPages: 300 kB\n")) -> None:
+        (root / "proc").mkdir(parents=True, exist_ok=True)
+        (root / "proc/meminfo").write_bytes(meminfo)
+        if psi is not None:
+            (root / "proc/pressure").mkdir(exist_ok=True)
+            text = ("some avg10=1.50 avg60=0.20 avg300=0.00 total=123\n"
+                    "full avg10=0.10 avg60=0.00 avg300=0.00 total=5\n") if psi == "valid" else psi
+            (root / "proc/pressure/memory").write_text(text)
+        if vmstat is not None:
+            (root / "proc/vmstat").write_text(vmstat)
+
+    def _sample(self, root: Path, now: float,
+                reader: MemoryReader | None = None) -> tuple[dict, dict]:
+        vals, info = {}, {}
+        (reader or MemoryReader(str(root))).sample(now, vals, info)
+        return vals, info["mem"]
+
+    def test_missing_psi_reports_reason(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self._tree(root, psi=None)
+            vals, mem = self._sample(root, 1.0)
+            self.assertIsNone(mem["psi"])
+            self.assertEqual(mem["psi_reason"], PSI_MISSING)
+            self.assertNotIn("mem.psi_some", vals)
+
+    def test_psi_missing_some_line_keeps_full(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self._tree(root, psi="full avg10=0.5 avg60=0.1 avg300=0.0 total=9\n")
+            vals, mem = self._sample(root, 1.0)
+            self.assertEqual(mem["psi"], {"full": {"avg10": 0.5, "avg60": 0.1,
+                                                   "avg300": 0.0, "total": 9.0}})
+            self.assertIsNone(vals.get("mem.psi_some"))  # no fabricated pressure value
+
+    def test_vmstat_gating_and_parsing(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self._tree(root, vmstat="nr_free_pages 1\npswpin 100\npswpout 40\n")
+            reader = MemoryReader(str(root))
+            opens = []
+            real_open = os.open
+
+            def counting(path, *args, **kwargs):
+                if "vmstat" in str(path):
+                    opens.append(str(path))
+                return real_open(path, *args, **kwargs)
+
+            with mock.patch("asusius.telemetry.util.os.open", side_effect=counting):
+                _, mem = self._sample(root, 1.0)
+                self.assertEqual(opens, [])  # track_swap False: zero vmstat reads
+                self.assertNotIn("pswpin", mem)
+                self.assertNotIn("pswpout", mem)
+                self.assertNotIn("vmstat_t", mem)
+                reader.track_swap = True
+                _, mem = self._sample(root, 2.0, reader)
+                self.assertEqual(len(opens), 1)  # exactly one read once enabled
+                self.assertEqual((mem["pswpin"], mem["pswpout"], mem["vmstat_t"]),
+                                 (100, 40, 2.0))
+                _, mem = self._sample(root, 2.5, reader)
+                self.assertEqual(len(opens), 1)  # throttled: no second read
+                self.assertNotIn("pswpin", mem)  # skipped tick: keys absent, no reuse
+                _, mem = self._sample(root, 3.0, reader)
+                self.assertEqual(len(opens), 2)
+                self.assertEqual(mem["pswpin"], 100)
+
+    def test_vmstat_malformed_line_leaves_counter_absent(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self._tree(root, vmstat="pswpin abc\npswpout 40\n")
+            reader = MemoryReader(str(root))
+            reader.track_swap = True
+            _, mem = self._sample(root, 1.0, reader)
+            self.assertNotIn("pswpin", mem)  # malformed line: that counter absent, not 0
+            self.assertEqual(mem["pswpout"], 40)
+            self.assertEqual(mem["vmstat_t"], 1.0)
+
+    def test_vmstat_absent_file_never_publishes_counters(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self._tree(root)
+            reader = MemoryReader(str(root))
+            reader.track_swap = True
+            _, mem = self._sample(root, 1.0, reader)
+            for key in ("pswpin", "pswpout"):
+                self.assertNotIn(key, mem)
+            self.assertEqual(mem["vmstat_t"], 1.0)  # attempted read invalidates the baseline
+
+
+class MemoryFixtureTests(unittest.TestCase):
+    """FakeWorld memory narratives, degenerate knobs and the MemHistory wiring."""
+
+    def _walk(self, root: Path, world, times: list[float]) -> list[dict]:
+        """Primitive snapshots (walker rows are mutable and reused between walks)."""
+        from asusius.telemetry.procs import ProcessWalker
+        walker = ProcessWalker(str(root))
+        rows = []
+        for t in times:
+            world.advance(t)
+            rows.append({p.pid: (p.start, p.mem, p.rss, p.app)
+                         for p in walker.walk(t)})
+        return rows
+
+    def test_sampler_feeds_mem_history(self):
+        from asusius.telemetry.fake import FakeWorld
+        with tempfile.TemporaryDirectory() as d:
+            root = build_fake_tree(Path(d) / "root")
+            w = FakeWorld(root)
+            w.advance(100.0)
+            s = Sampler(str(root), fake=True)
+            for t in (101.0, 102.0, 103.0):
+                w.advance(t)
+                s.sample(t)
+            mh = s.mem_history
+            self.assertEqual(mh.count, 3)  # 1 Hz ticks all commit
+            self.assertIs(mh.store, s.mem_history.store)
+            self.assertEqual(mh.last("total"), 16 * (1 << 30) - 420 * (1 << 20))
+            self.assertGreater(mh.last("in_use"), 0)
+            self.assertIsNone(mh.last("file"))  # default world: no Active(file) lines
+            self.assertIsNone(mh.last("pswpin_bps"))  # default world: no vmstat at all
+            # the shared store and its mem.* vals keys keep flowing untouched
+            self.assertIsNotNone(s.store.last("mem.in_use"))
+            self.assertIsNotNone(s.store.last("mem.swap_used"))
+            self.assertEqual(s.info["mem"]["psi"]["some"]["avg10"], 0.0)
+
+    def test_file_rise_narrative(self):
+        from asusius.telemetry.fake import FakeWorld
+        with tempfile.TemporaryDirectory() as d:
+            root = build_fake_tree(Path(d) / "root")
+            w = FakeWorld(root, mode="file-rise")
+            reader = MemoryReader(str(root))
+            reader.track_swap = True
+            rows = []
+            for t in (100.0, 130.0, 160.0):
+                w.advance(t)
+                vals, info = {}, {}
+                reader.sample(t, vals, info)
+                rows.append(info["mem"])
+            a, _, b = rows
+            self.assertGreater(b["file"], a["file"] + 200 * (1 << 20))  # cache rises
+            self.assertLess(abs(b["available"] - a["available"]), 300 * 1024)  # steady
+            self.assertLess(abs(b["anon"] - a["anon"]), 100 * (1 << 20))  # flat
+            self.assertLess(a["psi"]["some"]["avg10"], 0.05)  # PSI near zero, steady
+            self.assertLess(b["psi"]["some"]["avg10"], 0.05)
+            self.assertEqual((a["pswpin"], a["pswpout"]), (0, 0))  # quiet swap: real 0
+            self.assertIn("vmstat_t", a)
+            self.assertTrue(0 < a["swap_used"] < 2 * (1 << 30))
+            self.assertEqual(b["total"], a["total"])
+            # an hour in: every narrative level is clamped into [floor, MemTotal]
+            w.advance(3700.0)
+            vals, info = {}, {}
+            reader.sample(3700.0, vals, info)
+            late = info["mem"]
+            self.assertLess(late["file"], 9 * (1 << 30))  # capped, never tens of GiB
+            self.assertLess(late["anon"], 7 * (1 << 30))  # anon stays flat
+            self.assertLess(late["available"], 16 * (1 << 30))
+            self.assertGreater(late["available"], 0)
+
+    def test_anon_rise_narrative(self):
+        from asusius.telemetry.fake import FakeWorld
+        with tempfile.TemporaryDirectory() as d:
+            root = build_fake_tree(Path(d) / "root")
+            w = FakeWorld(root, mode="anon-rise")
+            reader = MemoryReader(str(root))
+            reader.track_swap = True
+            rows = []
+            t = 100.0
+            for i in range(30):  # 2 s ticks: dt stays under the suspend-freeze gap
+                w.advance(t)
+                if i in (0, 15, 29):  # world elapsed ~1 s, ~31 s, ~59 s
+                    vals, info = {}, {}
+                    reader.sample(t, vals, info)
+                    rows.append(info["mem"])
+                t += 2.0
+            a, mid, b = rows
+            self.assertGreater(b["anon"], a["anon"] + 400 * (1 << 20))  # anon rises
+            self.assertLess(b["available"], a["available"] - 400 * (1 << 20))  # depletes
+            self.assertGreater(b["psi"]["some"]["avg10"], a["psi"]["some"]["avg10"])
+            self.assertGreater(b["psi"]["full"]["avg10"], 0.0)
+            self.assertEqual(a["pswpin"], 0)  # swap-out story: pswpin stays ~0
+            self.assertGreater(b["pswpout"], a["pswpout"])  # swap-out counter grows
+            self.assertGreater(b["swap_used"], a["swap_used"])  # SwapFree drops
+            self.assertEqual(b["total"], 16 * (1 << 30) - 420 * (1 << 20))  # constant
+            # a big jump later: levels clamp into [floor, MemTotal], PSI at ceiling
+            w.advance(4100.0)
+            vals, info = {}, {}
+            reader.sample(4100.0, vals, info)
+            late = info["mem"]
+            self.assertLess(late["anon"], 16 * (1 << 30))  # not 89 GiB on a 16 GiB box
+            self.assertGreater(late["available"], 0)
+            self.assertLess(late["available"], 16 * (1 << 30))
+            self.assertAlmostEqual(late["psi"]["some"]["avg10"], 4.0)
+            self.assertLessEqual(late["swap_used"], 4 * (1 << 30))  # never over-full
+
+    def test_degenerate_fixture_knobs(self):
+        from asusius.telemetry.fake import FakeWorld
+        with tempfile.TemporaryDirectory() as d:
+            root = build_fake_tree(Path(d) / "root")
+            w = FakeWorld(root, psi=False, swap=False, mem_missing=("MemAvailable",),
+                          mem_bad=("Shmem",))
+            w.advance(10.0)
+            _, mem = MemoryReaderTests._sample(self, root, 10.0)
+            self.assertIsNone(mem["psi"])  # no /proc/pressure/memory at all
+            self.assertEqual(mem["psi_reason"], PSI_MISSING)
+            self.assertEqual((mem["swap_total"], mem["swap_used"]), (0, 0))
+            self.assertIsNone(mem["available"])  # MemAvailable line dropped
+            self.assertEqual(mem["shmem"], 0)  # malformed line -> legacy 0-default
+
+    def test_process_fixture_knobs(self):
+        from asusius.telemetry.fake import FakeWorld
+        with tempfile.TemporaryDirectory() as d:
+            root = build_fake_tree(Path(d) / "root")
+            w = FakeWorld(root, restart_pid=2101, restart_after=2.0, growing_pid=2610,
+                          partial_statm_pid=1460, long_label_pid=2610, perf_pids=24)
+            rows = self._walk(root, w, [100.0, 102.0, 112.0])
+            first, after_restart, later = rows
+            # same PID, different start time across advances -> a new walker identity
+            self.assertEqual(after_restart[2101][0], 9000 + 2101)
+            self.assertNotEqual(first[2101][0], after_restart[2101][0])
+            # unreadable statm -> the walker falls back to the RSS estimate
+            start, mem, rss, _app = after_restart[1460]
+            self.assertEqual(mem, rss)
+            self.assertGreater(mem, 0)
+            # the overlong app label survives the cgroup parse
+            self.assertGreater(len(first[2610][3]), 100)
+            # deterministic perf fixture: 12 app groups with distinct footprints
+            perf = [v for pid, v in later.items() if pid >= 20000]
+            self.assertEqual(len(perf), 24)
+            self.assertTrue(all(v[3] and v[3].startswith("org.perf.App") for v in perf))
+            totals = {}
+            for _start, mem, _rss, app in perf:
+                totals[app] = totals.get(app, 0) + mem
+            self.assertEqual(len(totals), 12)
+            ordered = [totals[f"org.perf.App{j}"] for j in range(12)]
+            self.assertEqual(len(set(ordered)), 12)  # no colliding per-app footprints
+            self.assertEqual(ordered, sorted(ordered))  # sizes rise with app index
+            # the growing app's private memory ramps (unsaturated) over the window
+            self.assertGreater(later[2610][1], first[2610][1])
+            self.assertGreater(later[2610][1] - first[2610][1], 10 * (1 << 20))
 
 
 class DiskNetTests(unittest.TestCase):
