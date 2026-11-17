@@ -22,7 +22,7 @@ from ...updates.verify import RESULT_TITLES
 from ...automation.config import update_config
 from ..tasks import run_bg
 from ..widgets import label
-from .base import Page, button, info_row, pill, prefs_page
+from .base import Page, button, info_row, pill, prefs_page, wrap_group_title
 
 esc = GLib.markup_escape_text
 MAX_ROWS = 60          # per source; the rest is summarised
@@ -569,6 +569,7 @@ class UpdatesPage(Page):
             btn.set_tooltip_text(f"Install updates from {src.title}")
             head.append(btn)
         g.set_header_suffix(head)
+        wrap_group_title(g)
         if src.error:
             warn_ico = Gtk.Image.new_from_icon_name("dialog-warning-symbolic")
             warn_ico.set_tooltip_text(src.error)

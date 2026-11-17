@@ -1,6 +1,6 @@
 # Two-minute hardware-free quickstart
 
-This launches the released Asusius 0.2.1 interface with simulated laptop data. It does not
+This launches the released Asusius 0.3.0 interface with simulated laptop data. It does not
 need an ASUS laptop, `asusd`, or `supergfxd`. It needs Linux, Python 3.12+, GTK 4, Libadwaita
 1.5, PyGObject, and a running graphical session.
 
@@ -23,7 +23,7 @@ when you close the demo window.
   set -eu
   demo_dir=$(mktemp -d)
   trap 'rm -r -- "$demo_dir"' EXIT
-  git clone --branch v0.2.1 --depth 1 https://github.com/hamza-gouda1/asusius.git "$demo_dir/asusius"
+  git clone --branch v0.3.0 --depth 1 https://github.com/hamza-gouda1/asusius.git "$demo_dir/asusius"
   export HOME="$demo_dir/home"
   export XDG_CONFIG_HOME="$HOME/.config"
   export XDG_DATA_HOME="$HOME/.local/share"
@@ -47,6 +47,7 @@ backend while `ASUSIUS_FAKE_ROOT` is set. This quickstart does not install the d
 GNOME extension, shortcuts, privileged helper, or any system service. It does not validate
 hardware compatibility or real firmware behavior.
 
-The walkthrough was rendered from genuine app pages by the release's headless screenshot tool
+The walkthrough illustrates the 0.2.1 dashboard and controls. It was rendered from genuine
+app pages by that release's headless screenshot tool
 using its fake hardware tree, temporary `HOME`, private D-Bus session, and headless Wayland
 compositor. It is an animated sequence of captures, not a live screen recording.

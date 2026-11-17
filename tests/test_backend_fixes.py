@@ -22,7 +22,7 @@ class LayeringAndVersionTests(unittest.TestCase):
         from asusius.core import AURA_MODES as CORE_MODES
         from asusius.core.models import AURA_MODES as MODEL_MODES
 
-        self.assertEqual(asusius.__version__, "0.2.1")
+        self.assertEqual(asusius.__version__, "0.3.0")
         self.assertEqual(CORE_MODES, MODEL_MODES)
         self.assertIn(10, MODEL_MODES)
         self.assertNotIn(9, MODEL_MODES)

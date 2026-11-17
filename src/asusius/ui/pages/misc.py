@@ -9,7 +9,7 @@ from gi.repository import Adw, Gdk, Gio, GLib, Gtk
 
 from ... import __version__
 from ..widgets import label
-from .base import Page, button, pill, prefs_page
+from .base import Page, button, pill, prefs_page, wrap_group_title
 
 REPO_URL = "https://github.com/hamza-gouda1/Asusius"
 ISSUES_URL = "https://github.com/hamza-gouda1/Asusius/issues"
@@ -53,6 +53,7 @@ class AboutPage(Page):
                           on_click=self._copy_diagnostics)
         copy_btn.set_valign(Gtk.Align.CENTER)
         self.support.set_header_suffix(copy_btn)
+        wrap_group_title(self.support)
         self.rows: list[Gtk.Widget] = []
 
         g2 = Adw.PreferencesGroup(title="Project")
