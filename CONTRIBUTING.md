@@ -5,7 +5,18 @@ kernel and asusd/supergfxd versions. Remove usernames, serials and other private
 from logs. Report security issues privately as described in [SECURITY.md](SECURITY.md).
 
 Keep changes focused. Use Python 3.12, existing style and GPL-3.0-or-later headers with
-Copyright (C) Hamza Gouda. Run:
+Copyright (C) Hamza Gouda. Install the system GTK dependencies from
+[INSTALL.md](docs/INSTALL.md), then create a development environment with the project's
+dev extras, including pytest and Ruff. System site packages make the distribution's
+PyGObject installation available inside the environment.
+
+```sh
+python3 -m venv --system-site-packages .venv
+. .venv/bin/activate
+python -m pip install -e '.[dev]'
+```
+
+Run the checks from the repository root with that environment active.
 
 ```sh
 PYTHONPATH=src python3 -m unittest discover -s tests
