@@ -7,14 +7,12 @@ import os
 import shlex
 import signal
 from typing import TYPE_CHECKING
-from gi.repository import Adw, Gdk, GLib, Gtk, Pango
+from gi.repository import Adw, Gdk, Gtk, Pango
 from ...telemetry import fmt
-from ...telemetry.procs import set_priority
-from ..tasks import run_bg
 from ..viewmodels import signal_refusal
 from .base import value_row
 from .monitor_base import set_text
-from .process_rows import (INSPECT_MS, EXITED_TEXT, CHANGED_TEXT, INFO_ROWS, MEMORY_ROWS,
+from .process_rows import (EXITED_TEXT, CHANGED_TEXT, INFO_ROWS, MEMORY_ROWS,
                            VAL_MAX_CHARS, _VAL_START_ELLIPSIZE)
 
 if TYPE_CHECKING:
