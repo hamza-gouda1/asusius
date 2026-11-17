@@ -3,6 +3,8 @@
 """Memory: /proc/meminfo, swap, zram, zswap, DDR (DMI) and pressure stall information."""
 from __future__ import annotations
 
+import math
+
 from functools import cached_property
 
 from .util import join, listdir, read_bytes, read_str
@@ -12,7 +14,11 @@ PSI_MISSING = ("not available: this kernel has no /proc/pressure (built without 
 
 
 def parse_meminfo(data: bytes) -> dict[str, int]:
-    """{field: bytes}; values in /proc/meminfo are kB (KiB) unless unitless (HugePages_*)."""
+    """{field: bytes}; values in /proc/meminfo are kB (KiB) unless unitless (HugePages_*).
+
+    Per-line independence: one malformed line (a value int() cannot parse) leaves
+    that field absent and never fails the rest of the file.
+    """
     out: dict[str, int] = {}
     for line in data.split(b"\n"):
         if not line:
@@ -21,26 +27,55 @@ def parse_meminfo(data: bytes) -> dict[str, int]:
         parts = rest.split()
         if not parts:
             continue
-        v = int(parts[0])
-        out[key.decode()] = v * 1024 if len(parts) > 1 and parts[1] == b"kB" else v
+        try:
+            v = int(parts[0])
+        except ValueError:
+            continue  # that field is absent; the others still parse
+        if v >= 0:
+            out[key.decode(errors="replace")] = (
+                v * 1024 if len(parts) > 1 and parts[1] == b"kB" else v)
     return out
 
 
-def derive(mi: dict[str, int]) -> dict[str, float]:
-    """Partition of MemTotal used by the charts, plus the figures `free` prints.
+def derive(mi: dict[str, int]) -> dict[str, float | None]:
+    """Validity-aware memory figures, plus the figures `free` prints.
 
-    in_use + reclaimable + free == total, exactly:
+    The estimate keys (total/available/free/in_use/reclaimable and the new file,
+    slab, page_tables, kernel_stack) are None when their source is missing or
+    invalid — an unavailable estimate is never fabricated from a zero:
       in_use      = MemTotal - MemAvailable  (what procps >= 4 calls "used")
       reclaimable = MemAvailable - MemFree   (cache the kernel can drop)
+    in_use + reclaimable + free == total holds only while MemAvailable >= MemFree;
+    when Available dips below Free, reclaimable clamps to 0 and the identity may
+    break (the two-part availability estimate stays exact). Legacy keys keep their
+    0-default semantics exactly. KReclaimable (which includes SReclaimable) is
+    never added to the slab figures; AnonPages, Shmem and Active(file)+Inactive(file)
+    are independent series — the file line is file-backed LRU only, never Shmem.
     """
-    total = mi.get("MemTotal", 0)
-    free = min(total, max(0, mi.get("MemFree", 0)))
-    avail = min(total, max(0, mi.get("MemAvailable", free)))
-    reclaimable = max(0, avail - free)
+    total = mi.get("MemTotal")
+    free = mi.get("MemFree")
+    if free is not None:
+        free = min(total, max(0, free)) if total is not None else max(0, free)
+    avail = mi.get("MemAvailable")
+    if avail is not None:  # no free-fallback: absent kernel line -> absent estimate
+        avail = min(total, max(0, avail)) if total is not None else max(0, avail)
+    afile, ifile = mi.get("Active(file)"), mi.get("Inactive(file)")
+    swap_total, swap_free = mi.get("SwapTotal"), mi.get("SwapFree")
+    swap_used = (swap_total - swap_free
+                 if swap_total is not None and swap_free is not None
+                 and 0 <= swap_free <= swap_total else None)
+    slab = mi.get("Slab")
+    if slab is None:
+        sr, su = mi.get("SReclaimable"), mi.get("SUnreclaim")
+        slab = sr + su if sr is not None and su is not None else None
     out = {
         "total": total, "available": avail, "free": free,
-        "in_use": total - free - reclaimable,
-        "reclaimable": reclaimable,
+        "in_use": total - avail if total is not None and avail is not None else None,
+        "reclaimable": (max(0, avail - free)
+                        if avail is not None and free is not None else None),
+        "file": afile + ifile if afile is not None and ifile is not None else None,
+        "slab": slab,
+        "page_tables": mi.get("PageTables"), "kernel_stack": mi.get("KernelStack"),
         "buffers": mi.get("Buffers", 0), "cached": mi.get("Cached", 0),
         "buff_cache": mi.get("Buffers", 0) + mi.get("Cached", 0) + mi.get("SReclaimable", 0),
         "shmem": mi.get("Shmem", 0), "slab_reclaimable": mi.get("SReclaimable", 0),
@@ -50,6 +85,10 @@ def derive(mi: dict[str, int]) -> dict[str, float]:
         "swap_total": mi.get("SwapTotal", 0),
         "swap_used": max(0, mi.get("SwapTotal", 0) - mi.get("SwapFree", 0)),
         "swap_cached": mi.get("SwapCached", 0),
+        "swap_capacity_bytes": swap_total,
+        "swap_used_bytes": swap_used,
+        "anonymous_bytes": mi.get("AnonPages"),
+        "shared_bytes": mi.get("Shmem"),
         "zswap_pool": mi.get("Zswap"), "zswap_stored": mi.get("Zswapped"),
         "anon": mi.get("AnonPages", 0), "mapped": mi.get("Mapped", 0),
     }
@@ -57,15 +96,30 @@ def derive(mi: dict[str, int]) -> dict[str, float]:
 
 
 def parse_psi(text: str | None) -> dict[str, dict[str, float]] | None:
-    """{'some': {'avg10': .., 'avg60': .., 'avg300': .., 'total': us}, 'full': {...}}."""
+    """{'some': {'avg10': .., 'avg60': .., 'avg300': .., 'total': us}, 'full': {...}}.
+
+    Per-line tolerant like parse_meminfo: one malformed avg= line is dropped and
+    the other lines still parse; an entry whose value fails float() is dropped,
+    not the whole line. A missing "some" line simply leaves "some" out.
+    """
     if not text:
         return None
-    out = {}
+    out: dict[str, dict[str, float]] = {}
     for line in text.splitlines():
         parts = line.split()
-        if not parts:
+        if len(parts) < 2:
             continue
-        out[parts[0]] = {k: float(v) for k, v in (p.split("=") for p in parts[1:])}
+        vals: dict[str, float] = {}
+        for p in parts[1:]:
+            k, _, v = p.partition("=")
+            try:
+                parsed = float(v)
+            except ValueError:
+                continue  # malformed entry dropped; the line's other fields stay
+            if math.isfinite(parsed) and parsed >= 0:
+                vals[k] = parsed
+        if vals:
+            out[parts[0]] = vals
     return out
 
 
@@ -162,8 +216,56 @@ def parse_dmi_memory(raw: bytes) -> dict | None:
 
 
 class MemoryReader:
+
     def __init__(self, root: str = "/") -> None:
         self.root = root
+        # Swap-activity tracking is requested by the main thread while the Memory
+        # page is visible; the worker only reads it (benign one-tick races, no lock).
+        self._track_swap = False
+        self._swap_epoch = 0
+        self._vmstat_epoch = -1
+        self._vmstat_t: float | None = None
+
+    @property
+    def track_swap(self) -> bool:
+        return self._track_swap
+
+    @track_swap.setter
+    def track_swap(self, active: bool) -> None:
+        if active != self._track_swap:
+            self._swap_epoch += 1
+            self._track_swap = active
+
+    def _vmstat(self, now: float, d: dict) -> None:
+        """pswpin/pswpout page counters from /proc/vmstat, throttled to ~1 read/s.
+
+        Keys are absent from d when the read is skipped or a line is malformed —
+        never a stale reuse and never a fabricated zero; zero traffic is a real 0.
+        A counter decrease is not fixed up here (MemHistory rebaselines).
+        """
+        epoch = self._swap_epoch
+        if not self._track_swap:
+            return
+        if (epoch == self._vmstat_epoch and self._vmstat_t is not None
+                and int(now) <= int(self._vmstat_t)):
+            return
+        self._vmstat_t = now
+        self._vmstat_epoch = epoch
+        d["vmstat_t"] = now
+        d["vmstat_epoch"] = epoch
+        data = read_bytes(join(self.root, "proc/vmstat"))
+        if data is None:
+            return
+        for line in data.split(b"\n"):
+            key, _, rest = line.partition(b" ")
+            if key not in (b"pswpin", b"pswpout"):
+                continue
+            try:
+                value = int(rest)
+            except ValueError:
+                continue  # malformed line -> that counter absent, never 0
+            if value >= 0:
+                d[key.decode()] = value
 
     def zswap_enabled(self) -> bool | None:
         v = read_str(join(self.root, "sys/module/zswap/parameters/enabled"))
@@ -237,6 +339,8 @@ class MemoryReader:
         if psi:
             vals["mem.psi_some"] = psi.get("some", {}).get("avg10")
         d["psi"], d["psi_reason"] = psi, why
+        if self.track_swap:
+            self._vmstat(now, d)
         self._zram(vals, d)
         ddr = self._ddr_inventory
         if ddr:

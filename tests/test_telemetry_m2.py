@@ -253,7 +253,12 @@ class ZramTests(unittest.TestCase):
     def test_memory_partition_when_available_is_smaller_than_free(self):
         mem = derive({"MemTotal": 100, "MemFree": 20, "MemAvailable": 10})
         self.assertEqual(mem["available"], 10)
-        self.assertEqual(sum(mem[key] for key in ("in_use", "free", "reclaimable")), 100)
+        # derive v2 (M5 contract §1.2): in_use = total - available holds directly
+        # even when available < free; reclaimable clamps to 0 and the old
+        # three-way partition identity is accepted to break here.
+        self.assertEqual(mem["in_use"], 90)
+        self.assertEqual(mem["free"], 20)
+        self.assertEqual(mem["reclaimable"], 0)
 
     def _tree(self, root: Path, stats: dict[str, str | None]) -> None:
         _w(root / "proc/meminfo", MEMINFO)
