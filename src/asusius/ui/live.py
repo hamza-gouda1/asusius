@@ -13,6 +13,12 @@ polled on the worker pool at a bounded cadence and its inventory is pushed to th
 page on the main loop; history requests run on the same pool with a per-(device,
 range) token guard so stale responses are dropped. A matching local battery
 supplies voltage samples on discharge if UPower has no voltage history.
+
+Memory-page seams: showing the Memory page arms the sampler's vmstat reads
+(track_swap), and process walks are owner-tagged (request_processes) so the
+Processes page and the Memory page's app panel can both hold the walk without
+stepping on each other; every owner activation re-baselines the app-memory
+tracker, which observes every qualifying delivery (timer and synchronous ticks).
 """
 from __future__ import annotations
 
@@ -24,8 +30,10 @@ from gi.repository import GLib
 
 from ..backends.pool import run_async
 from ..telemetry import Sampler
+from ..telemetry.app_memory import APP_MEMORY_OWNER, AppMemoryTracker
 from ..telemetry.power_history import LocalVoltageStore
 from .tasks import run_bg
+from .viewmodels import OWN_APP_ID
 
 PROCS_EVERY_S = 2.0
 POWER_POLL_S = 10.0        # inventory poll cadence while the battery page is shown
@@ -36,16 +44,18 @@ VOLTAGE_LOG_INTERVAL_S = 60.0
 
 
 class LiveHub:
-    def __init__(self, fake_root: str | None = None, upower=None) -> None:
+    def __init__(self, fake_root: str | None = None, upower=None,
+                 world_mode: str | None = None) -> None:
         self.fake = fake_root is not None
         root = fake_root or "/"
         self.world = None
         if self.fake:
             from ..telemetry.fake import FakeWorld
-            self.world = FakeWorld(Path(root))
+            self.world = FakeWorld(Path(root), mode=world_mode or "default")
             self.world.advance(time.monotonic() - 1.0)
         self.sampler = Sampler(root, fake=self.fake)
         self.store = self.sampler.store
+        self.mem_store = self.sampler.mem_history  # the Memory page's 5-minute ring
         self.root = root
         self.interval_s = 1.0
         self.listeners: list = []
@@ -61,9 +71,12 @@ class LiveHub:
         self.procs_t = -1e9
         self.procs_gen = 0
         self._walker = None
+        self._proc_owners: set[str] = set()
+        self.app_memory = AppMemoryTracker(own_pid=os.getpid(), own_app_id=OWN_APP_ID)
         # -- power page (UPower) state; `upower` injects a client (tests, QA) ---------------
         self._upower = upower
         self._power_page = None             # the battery page while it is shown
+        self._mem_page = None               # the memory page while it is shown
         self._power_timer: int | None = None
         self._power_errors = 0
         self._power_delay = POWER_POLL_S
@@ -82,6 +95,7 @@ class LiveHub:
         if self.running or self.hold or self._closed:
             return
         self.running = True
+        self.sampler.mem.track_swap = self._mem_page is not None
         self._schedule()
         self.tick()
         if self._power_page is not None:
@@ -89,7 +103,11 @@ class LiveHub:
 
     def stop(self) -> None:
         self.running = False
+        self.sampler.mem.track_swap = False
         self._power_stop_poll()
+        self._procs_epoch += 1
+        self.procs_t = -1e9
+        self.app_memory.reset()  # a sampling discontinuity: growth starts fresh
         if self._timer is not None:
             GLib.source_remove(self._timer)
             self._timer = None
@@ -101,6 +119,8 @@ class LiveHub:
         self.stop()
         if self._power_page is not None:
             self.power_page_hidden(self._power_page)
+        if self._mem_page is not None:
+            self.mem_page_hidden(self._mem_page)
         self._power_stop_poll()
         self._upower = None
         if not self._busy:
@@ -123,13 +143,28 @@ class LiveHub:
             self._timer = GLib.timeout_add(int(self.interval_s * 1000), self._on_timer)
 
     def want_processes(self, on: bool) -> None:
+        """Compat shim for the Processes page's walk request (owner "processes")."""
+        self.request_processes(on, "processes")
+
+    def request_processes(self, on: bool, owner: str = "processes") -> None:
+        """Owner-tagged walk request (the Processes page, the Memory app panel).
+
+        Every owner activation — each off->on transition for that owner — resets
+        the app-memory tracker, so re-opening the panel re-baselines. The epoch
+        bump invalidates walks in flight; when the last owner releases, the walk
+        stops and the delivered rows are dropped."""
         self._procs_epoch += 1
-        self.procs_wanted = on
-        if not on:
-            self.procs = []
-            self._walker = None
-        else:
+        if on:
+            if owner == APP_MEMORY_OWNER and owner not in self._proc_owners:
+                self.app_memory.reset()  # the next valid delivery sets the baseline
+            self._proc_owners.add(owner)
             self.procs_t = -1e9
+        else:
+            self._proc_owners.discard(owner)
+            if not self._proc_owners:
+                self.procs = []
+                self._walker = None
+        self.procs_wanted = bool(self._proc_owners)
 
     def _on_timer(self) -> bool:
         self.tick()
@@ -161,6 +196,17 @@ class LiveHub:
                                 info.get("dgpu", {}).get("procs"))
         return now, vals, info, procs, epoch
 
+    def _deliver_procs(self, now: float, procs: list) -> None:
+        """Publish one qualifying walker snapshot and feed the app-memory tracker.
+
+        Both the timer delivery and collect_now funnel through here, so the QA
+        harness's synchronous ticks observe exactly what the live path observes."""
+        self.procs = procs
+        self.procs_t = now
+        self.procs_gen += 1
+        if APP_MEMORY_OWNER in self._proc_owners:
+            self.app_memory.observe(now, procs)
+
     def _deliver(self, fut) -> bool:
         self._busy = False
         if self._closed:
@@ -175,23 +221,22 @@ class LiveHub:
         self.sampler.commit(now, vals, info)
         self._record_voltage()
         if procs is not None and epoch == self._procs_epoch and self.procs_wanted:
-            self.procs = procs
-            self.procs_t = now
-            self.procs_gen += 1
+            self._deliver_procs(now, procs)
         self.ticks += 1
         for fn in list(self.listeners):
             fn(self)
         return GLib.SOURCE_REMOVE
 
     def collect_now(self, now: float, notify: bool = False) -> None:
-        """Synchronous tick (screenshot harness: build history with a fake clock)."""
+        """Synchronous tick (screenshot harness: build history with a fake clock).
+
+        The epoch+wanted guards live in _collect, so a delivery here already
+        passed them."""
         now, vals, info, procs, _epoch = self._collect(now)
         self.sampler.commit(now, vals, info)
         self._record_voltage()
         if procs is not None:
-            self.procs = procs
-            self.procs_t = now
-            self.procs_gen += 1
+            self._deliver_procs(now, procs)
         if notify:
             self.ticks += 1
             for fn in list(self.listeners):
@@ -216,6 +261,21 @@ class LiveHub:
             else:
                 self._upower = UpowerClient()
         return self._upower
+
+    # -- memory page: vmstat read gating --------------------------------------------------
+    def mem_page_shown(self, page) -> None:
+        """The Memory page is visible: the sampler may read /proc/vmstat for the
+        swap-rate series (the reader throttles itself to ~1 read per second)."""
+        self._mem_page = page
+        self.sampler.mem.track_swap = self.running or self.fake
+
+    def mem_page_hidden(self, page) -> None:
+        """Stop the vmstat reads for the page that hid (identity-guarded, like the
+        power page's hidden path)."""
+        if page is None or self._mem_page is not page:
+            return
+        self._mem_page = None
+        self.sampler.mem.track_swap = False
 
     def power_page_shown(self, page) -> None:
         """The battery page is visible: poll UPower inventory and keep it fresh.

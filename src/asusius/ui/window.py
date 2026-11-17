@@ -223,6 +223,8 @@ class MainWindow(Adw.ApplicationWindow):
                 page.set_profile(self.profile)
         elif key == "processes":
             self.responsive(page.fit_columns)
+        elif key == "memory":
+            self.responsive(page.fit_header)  # M5: RAM/pressure cards side-by-side when wide
         elif key in ("battery", "dgpu", "igpu", "display", "gestures"):
             self.responsive(page.fit_width)
         elif key in ("fanmon", "network"):

@@ -414,7 +414,8 @@ class DashboardPage(MonitorPage):
         self.mem.chart.y_fixed = (0, total / GIB) if total else None
         set_text(self.mem_swap, f"{(mem.get('swap_used') or 0) / GIB:.1f}"
                  if mem.get("swap_total") else "off")
-        set_text(self.mem_avail, f"{(mem.get('available') or 0) / GIB:.1f}" if mem else "–")
+        set_text(self.mem_avail, f"{mem['available'] / GIB:.1f}"
+                 if mem.get("available") is not None else "–")  # None = absent, not 0
         set_text(self.mem.foot, f"{100 * used / total:.0f} % in use · cache "
                  f"{fmt.bytes_(mem.get('buff_cache'))}" if used is not None and total else "")
         # iGPU

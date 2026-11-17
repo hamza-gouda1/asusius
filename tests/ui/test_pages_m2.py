@@ -36,7 +36,7 @@ from asusius.ui.pages.gpu_monitor import (  # noqa: E402
     link_text,
     video_entries,
 )
-from asusius.ui.pages.memory import MemoryPage, composition_parts, ddr_text, zram_line  # noqa: E402
+from asusius.ui.pages.memory import MemoryPage, ddr_text, zram_line  # noqa: E402
 from asusius.ui.viewmodels import nb  # the StatGrid cell text goes through nb()  # noqa: E402
 
 FIXTURE_MEMINFO = Path(__file__).resolve().parents[1] / "fixtures" / "telemetry" / "meminfo"
@@ -111,17 +111,12 @@ class CompositionTests(unittest.TestCase):
         self.assertEqual(sum(parts), total)  # derive() guarantees the exact partition
         self.assertTrue(all(p >= 0 for p in parts))
 
-    def test_fractions_sum_to_one(self):
+    def test_partition_in_use_is_total_minus_available(self):
+        # M5 contract §1.2: in_use = total - available directly; the old
+        # composition bar is gone — the new page charts in_use against available.
         m = self._derive()
-        parts = composition_parts(m)
-        self.assertEqual([c for _f, c in parts], ["primary", "gold", "muted"])
-        self.assertAlmostEqual(sum(f for f, _c in parts), 1.0, delta=1e-6)
-        self.assertAlmostEqual(parts[0][0], m["in_use"] / m["total"], places=12)
-
-    def test_no_total_yields_no_parts(self):
-        self.assertEqual(composition_parts({}), [])
-        self.assertEqual(composition_parts({"total": 0, "in_use": 0, "reclaimable": 0,
-                                            "free": 0}), [])
+        self.assertEqual(m["in_use"], m["total"] - m["available"])
+        self.assertEqual(m["reclaimable"], max(0, m["available"] - m["free"]))
 
 
 class VideoEntriesTests(unittest.TestCase):
@@ -288,24 +283,22 @@ class WiringTests(unittest.TestCase):
         hub = self._hub()
         page = MemoryPage(_win(hub))
         page.update()
-        # the swap panel gains the 'On zram' row: zram0 animated, zram1 a measured zero
-        row = page.swap.cells["zram"].get_label()
+        # compressed-memory disclosure rows from info["mem"] (zram0 animated,
+        # zram1 a measured zero; zswap off on the fake tree)
+        row = page.zram_val.get_label()
         self.assertTrue(row.startswith("zram0: "))
         self.assertIn("stored", row)
         self.assertIn(nb("zram1: 0 B stored"), row)  # real zero, not absent
-        self.assertIn("zswap", page.swap.boxes["zram"].get_tooltip_text())
-        # PSI avg300 cells from the static fake pressure file
-        self.assertEqual(page.psi_grid.cells["some300"].get_label(), nb("0.12 %"))
-        self.assertEqual(page.psi_grid.cells["full300"].get_label(), nb("0.03 %"))
+        # PSI avg300 cells from the static fake pressure file (details grid)
+        self.assertEqual(page.details.cells["psi_some300"].get_label(), nb("0.12 %"))
+        self.assertEqual(page.details.cells["psi_full300"].get_label(), nb("0.03 %"))
         # DMI absent on the fake tree -> needs-root tooltip on Total
         self.assertIn("Speed, type and slot layout need root (DMI)",
-                      page.stats.boxes["total"].get_tooltip_text())
-        # composition parts still sum to 1.0 through the page wiring
-        self.assertAlmostEqual(sum(f for f, _c in page.bar.parts), 1.0, delta=1e-6)
-        for key in ("mem.in_use", "mem.swap_used"):
-            c = _chart_with(page, key)
-            self.assertIsNotNone(c, key)
-            self.assertTrue(c.dense_grid and c.monitor, key)
+                      page.details.boxes["total"].get_tooltip_text())
+        # the three memory charts draw from the Memory ring, monitor layout
+        for c in page._mem_charts:
+            self.assertIsNotNone(c)
+            self.assertTrue(c.monitor)
 
     def test_dgpu_page_wiring(self):
         hub = self._hub()
@@ -429,9 +422,9 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(cpu.stats.cells["governor"].get_label(), "–")
         mem = MemoryPage(_win(hub))
         mem.update()
-        self.assertNotIn("zram", mem.swap.cells)  # row absent entirely
-        self.assertEqual(mem.psi_grid.cells["some300"].get_label(), "–")
-        self.assertEqual(mem.psi_grid.cells["full300"].get_label(), "–")
+        # M5: no zram devices -> the On zram disclosure row reads "–" (honest absence;
+        # the old lazy-row StatGrid is gone)
+        self.assertEqual(nb(mem.zram_val.get_label()), nb("–"))
         dg = NvidiaGpuPage(_win(hub))
         dg.update()
         self.assertEqual(dg.stats.cells["link"].get_label(), "–")
@@ -450,12 +443,12 @@ class WiringTests(unittest.TestCase):
                               root=str(root), interval_s=1.0)
         page = MemoryPage(_win(hub))
         page.update()
-        self.assertNotIn("zram", page.swap.cells)
-        for k in ("some", "full", "some60", "some300", "full300"):
-            self.assertEqual(page.psi_grid.cells[k].get_label(), "–", k)
+        # M5: meminfo-only tree -> zram row "–", PSI details "–", DMI tooltip kept
+        self.assertEqual(nb(page.zram_val.get_label()), nb("–"))
+        for k in ("psi_some60", "psi_some300", "psi_full60", "psi_full300"):
+            self.assertEqual(page.details.cells[k].get_label(), nb("–"), k)
         self.assertIn("Speed, type and slot layout need root (DMI)",
-                      page.stats.boxes["total"].get_tooltip_text())
-        self.assertAlmostEqual(sum(f for f, _c in page.bar.parts), 1.0, delta=1e-6)
+                      page.details.boxes["total"].get_tooltip_text())
 
 
 if __name__ == "__main__":
