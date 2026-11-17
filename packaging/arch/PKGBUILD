@@ -2,7 +2,7 @@
 # NOT yet built or tested on Arch. Build it in a clean chroot (extra-x86_64-build) before
 # submitting to the AUR. Publish the deterministic release asset and set sha256sums before uploading.
 pkgname=asusius
-pkgver=0.2.1
+pkgver=0.3.0
 pkgrel=1
 pkgdesc='Control app for ASUS TUF/ROG laptops: profiles, fans, keyboard lighting, GPU mode, telemetry'
 arch=('any')
@@ -19,7 +19,8 @@ optdepends=('asusctl: ASUS fan curves, Aura RGB, AniMe Matrix and charge limits 
 makedepends=('glib2' 'python-build' 'python-installer' 'python-setuptools' 'python-wheel')
 install="$pkgname.install"
 source=("$url/releases/download/v$pkgver/$pkgname-$pkgver.tar.gz")
-sha256sums=('8f49831cd49134e8ee1bd755c1fb65ab1bde28fc3ee3d08462b0c6bfe764391a')
+# The release asset checksum is pinned after the immutable tag is published.
+sha256sums=('SKIP')
 
 build() {
   cd "$pkgname-$pkgver"

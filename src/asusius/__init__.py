@@ -2,4 +2,4 @@
 # Copyright (C) Hamza Gouda
 """Control core for ASUS laptops."""
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"

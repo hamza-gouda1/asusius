@@ -43,6 +43,12 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.3.0" date="2026-11-17">
+      <description>
+        <p>Expanded system monitoring with disk usage analysis, process inspection,
+        detailed RAM history, and UPower battery and peripheral history.</p>
+      </description>
+    </release>
     <release version="0.2.1" date="2026-11-14"/>
     <release version="0.2.0" date="2026-11-12"/>
     <release version="0.1.2" date="2026-11-07"/>

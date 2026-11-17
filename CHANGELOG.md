@@ -4,6 +4,42 @@ All notable changes to this project. Format follows Keep a Changelog; versions f
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-17
+
+### Added
+- Storage disk usage analyzer with cancellable scans, treemap and rings views,
+  folder navigation, largest files, drive IOPS, latency, and hardware details.
+- CPU cache topology and governor/EPP policy groups, separate zram counters,
+  and PCIe link and video-engine readings where the GPU exposes them.
+- Grouped running apps and an on-demand process tree with live process details,
+  command copying, identity-checked stop actions, and priority controls.
+- UPower battery, UPS and peripheral inventory, per-device charge and power
+  history, and local voltage history with bounded storage.
+- Memory usage and breakdown history, pressure and swap activity, pinned samples,
+  and an optional app memory panel with comparable growth readings.
+
+### Changed
+- Monitor charts use denser grids and more of the available plotting space.
+- Process trees expand on demand to reduce retained widget memory.
+- Fake hardware and UI QA cover populated disk scans, battery histories,
+  missing devices, and RAM and app memory scenarios.
+
+### Fixed
+- Touchpad speed stays stable when scrolling or refreshing settings.
+- Nested disk map labels, chart scales, compact page titles and narrow controls
+  remain readable. Preference headings and keyboard effect names wrap at 360 px.
+- Asusius appears in running apps regardless of its launcher.
+- Unreadable GPU runtime status prevents an NVIDIA probe, and RAPL power readings
+  handle counter wraparound.
+- Memory rates reset across gaps, app growth uses comparable readings, and desktop
+  application indexing runs on the GTK thread.
+- Package-update filename matching avoids polynomial regular-expression backtracking.
+
+### Validation scope
+- Hardware validation remains limited to one ASUS TUF F16 FX608JHR on Ubuntu 24.04
+  with GNOME Wayland. Other laptop models and authenticated package and firmware
+  update transactions need independent validation.
+
 ## [0.2.1] - 2026-11-14
 
 ### Added
