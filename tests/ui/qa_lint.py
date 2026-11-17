@@ -23,7 +23,13 @@ disk, mount and rule names), `empty` (no sensors, no battery, no dGPU: empty sta
 `bat-multi` (two laptop batteries -> aggregate row) and `bat-nodev` (no power_supply
 entries -> dashes); the battery ones drive the page through an in-memory fake UPower
 (LiveHub.set_upower) and run the battery page only. The text-scale battery check is
-the existing `scale` mode, which visits every page at 150%.
+the existing `scale` mode, which visits every page at 150%. The memory modes run the
+Memory page only over their own matrix (dark + light at 1280x720, dark at 360x640,
+plus one 150%-text job via the `@scale` modifier, e.g. `mem-apps@scale`):
+`mem-default` (today's fixture: the file-cache line and swap plot show their absence
+states), `mem-pin` (a pinned sample inside the ring window), `mem-missing` (no PSI
+file, no swap) and `mem-apps` (anon-rise world, a growing app, the app-memory panel
+open and walks on).
 
 Memory safety. Everything is re-executed under
 `systemd-run --user --scope -p MemoryMax=1500M -p MemorySwapMax=0`, one GTK process at a
@@ -70,8 +76,14 @@ MEM_MAX = "1500M"
 CHILD_TIMEOUT = 420
 MODES = ("rtl", "scale", "long", "empty", "ppt", "gpu-lost",
          "bat-hist", "bat-short", "bat-empty", "bat-charging", "bat-periph",
-         "bat-multi", "bat-nodev")
+         "bat-multi", "bat-nodev",
+         "mem-default", "mem-pin", "mem-missing", "mem-apps")
 MODE_SIZES = ("1280x720", "640x700")
+# memory modes have their own matrix (contract §6.5): dark + light + 360x640,
+# plus one 150%-text job via the "@scale" modifier ("mem-apps@scale")
+MEM_MODES = ("mem-default", "mem-pin", "mem-missing", "mem-apps")
+MEM_JOBS = (("dark", "1280x720"), ("light", "1280x720"), ("dark", "360x640"))
+SCALE_SUFFIX = "@scale"
 THEME_PAIR_PAGES = ("dashboard", "performance", "fans", "battery", "processes")  # not the keyboard: live colour
 # battery QA mode -> scenario name in telemetry.fake.fake_upower_client
 BAT_SCENARIOS = {"bat-hist": "populated", "bat-short": "short", "bat-empty": "empty",
@@ -120,9 +132,17 @@ def jobs(args) -> list:
         out.append(("dark", "1280x720", "real"))
     if args.modes:
         for mode in args.modes.split(","):
-            for size in (s for s in sizes if s in MODE_SIZES
-                         or (mode == "bat-hist" and s == "360x640")):
-                out.append(("dark", size, mode))
+            base = mode[:-len(SCALE_SUFFIX)] if mode.endswith(SCALE_SUFFIX) else mode
+            if base in MEM_MODES:
+                # either spelling ("mem-apps", "mem-apps@scale") expands to the same
+                # four jobs: dark + light at 1280x720, dark at 360x640, one at 150%
+                for variant, size in MEM_JOBS:
+                    out.append((variant, size, base))
+                out.append(("dark", "1280x720", base + SCALE_SUFFIX))
+            else:
+                for size in (s for s in sizes if s in MODE_SIZES
+                             or (mode == "bat-hist" and s == "360x640")):
+                    out.append(("dark", size, mode))
     return out
 
 
@@ -307,6 +327,10 @@ def child(job: dict) -> int:
     from asusius.controller import FAKE_ROOT_ENV
 
     variant, size, mode = job["variant"], job["size"], job["mode"]
+    scale_150 = mode.endswith(SCALE_SUFFIX)  # "mem-apps@scale": the mode at 150% text
+    if scale_150:
+        mode = mode[:-len(SCALE_SUFFIX)]
+    mem_mode = mode in MEM_MODES
     name = job["name"]
     w, h, maximised = SIZES[size]
     findings: list = []
@@ -383,6 +407,35 @@ def child(job: dict) -> int:
         tfake.ensure = ensure_no_power
         tfake.FakeWorld.advance = lambda self, now: None  # it would rewrite BAT0
         shutil.rmtree(root / "sys/class/power_supply", ignore_errors=True)
+    if mem_mode:
+        # world_mode is injected by wrapping LiveHub (window.py is never modified);
+        # the wrapper is picked up because ui.window imports LiveHub only later
+        from asusius.ui import live as ui_live
+        mem_world = "file-rise" if mode == "mem-default" else (
+            "anon-rise" if mode in ("mem-pin", "mem-apps") else None)
+        orig_hub = ui_live.LiveHub
+
+        def hub_with_world(*a, **kw):
+            kw.setdefault("world_mode", mem_world)
+            return orig_hub(*a, **kw)
+
+        ui_live.LiveHub = hub_with_world
+    if mode in ("mem-missing", "mem-apps"):
+        # knobs beyond world_mode: the hub passes only mode, so FakeWorld itself is
+        # wrapped (LiveHub fetches it from the module at construction time)
+        from asusius.telemetry import fake as tfake
+        orig_fw = tfake.FakeWorld
+        mem_kind = mode
+
+        def world_with_knobs(root, mode="default", **kw):
+            if mem_kind == "mem-missing":  # PSI absent entirely, no swap configured
+                kw.setdefault("psi", False)
+                kw.setdefault("swap", False)
+            else:  # mem-apps: one app's private memory grows over the window
+                kw.setdefault("growing_pid", 3488)
+            return orig_fw(root, mode, **kw)
+
+        tfake.FakeWorld = world_with_knobs
     if not real:
         sh.seed_agent_demo()
     if long_mode:
@@ -402,7 +455,7 @@ def child(job: dict) -> int:
         Gtk.Widget.set_default_direction(Gtk.TextDirection.RTL)
     from asusius.ui.app import AsusiusApp
     app = AsusiusApp()
-    if mode == "scale":
+    if mode == "scale" or scale_150:
         def _scale(_a):
             Gtk.Settings.get_default().set_property("gtk-xft-dpi", int(96 * 1.5 * 1024))
         app.connect("startup", _scale)
@@ -495,7 +548,12 @@ def child(job: dict) -> int:
         else:
             hub.hold = True
             hub.stop()
+            while hub._busy:
+                yield 50
             hub.store.clear()
+            hub.mem_store.clear()
+            if mem_mode:
+                win.show_page("memory")
             hub.procs_wanted = True
             for i in range(120):
                 if mode not in ("empty", "bat-nodev"):
@@ -513,6 +571,8 @@ def child(job: dict) -> int:
         pages = [p for p in (job["pages"].split(",") if job["pages"] else PAGES) if p in win.pages]
         if mode == "ppt":
             pages = [p for p in ("performance", "dashboard") if p in pages]
+        if mem_mode:
+            pages = [p for p in ("memory",) if p in pages]
         bat_client = None
         if mode in BAT_SCENARIOS:  # the battery states drive the page over a fake UPower
             from asusius.telemetry.fake import fake_upower_client
@@ -586,6 +646,35 @@ def child(job: dict) -> int:
                     yield 250
                     if job.get("keep_shots"):
                         save_shot(frame(), f"history-{name}.png")
+                if key == "memory" and mem_mode:
+                    tick(2)  # establish swap rates after returning to Memory
+                    if hub.mem_store.count < 110:
+                        emit(Finding("memory-qa", "fail", key, "RAM history",
+                                     "the fixture did not populate the history ring"))
+                    if mode == "mem-pin" and hasattr(page, "qa_pin"):
+                        page.qa_pin(clock["t"] - 25.0)  # a pinned sample inside the ring
+                        if page.pin_ts is None:
+                            emit(Finding("memory-qa", "fail", key, "cursor",
+                                         "the pinned sample did not survive selection"))
+                        sh._scroll_to(page, page.ram_panel)
+                        yield 250
+                    if mode == "mem-apps":  # the app panel opens the walk + tracker
+                        if hasattr(page, "qa_set_app_panel"):
+                            page.qa_set_app_panel(True)
+                            tick(4)  # walks on: the tracker baselines, then grows
+                            if not hub.app_memory.ranking():
+                                emit(Finding("memory-qa", "fail", key, "app panel",
+                                             "the fixture did not produce any app groups"))
+                            yield 250
+                            if job.get("keep_shots"):
+                                sh._scroll_to(page, page.app_panel)
+                                yield 250
+                                save_shot(frame(), f"app-memory-{name}.png")
+                                sh._scroll_to(page, page.summary)
+                                yield 250
+                        else:
+                            emit(Finding("memory-qa", "warn", key, "app panel",
+                                         "the page exposes no qa_set_app_panel hook"))
                 if key == "processes":
                     pp = win.pages["processes"]
                     row = pp.tree.get_row(0)  # Apps section row

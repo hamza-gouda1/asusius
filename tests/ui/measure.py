@@ -36,9 +36,18 @@ def mem(pid: int | str = "self") -> dict:
         with open(f"/proc/{pid}/smaps_rollup") as fh:
             for line in fh:
                 k, _, v = line.partition(":")
-                if k in ("Rss", "Pss", "Private_Dirty", "Shared_Clean", "Pss_Anon", "Pss_File"):
+                if k in ("Rss", "Pss", "Private_Clean", "Private_Dirty",
+                         "Shared_Clean", "Pss_Anon", "Pss_File"):
                     out[k.lower()] = int(v.split()[0])
     except OSError:
+        pass
+    if "private_clean" in out and "private_dirty" in out:
+        out["private_resident"] = out["private_clean"] + out["private_dirty"]
+    try:
+        _size, resident, shared, *_ = Path(f"/proc/{pid}/statm").read_text().split()
+        out["statm_private_estimate"] = (
+            max(0, int(resident) - int(shared)) * os.sysconf("SC_PAGE_SIZE") // 1024)
+    except (OSError, ValueError):
         pass
     return out
 
@@ -112,7 +121,8 @@ def inner(args) -> int:
     if fake:
         sys.path.insert(0, str(SRC))
         from asusius.backends.fake import build_fake_tree
-        os.environ["ASUSIUS_FAKE_ROOT"] = str(build_fake_tree(Path(fake) / "root"))
+        os.environ["ASUSIUS_FAKE_ROOT"] = str(
+            os.environ.get("TUF_MEASURE_FAKE_TREE") or build_fake_tree(Path(fake) / "root"))
         from asusius.automation.config import CONFIG_DIR_ENV, RUNTIME_DIR_ENV
         os.environ[CONFIG_DIR_ENV] = str(Path(fake) / "config")
         os.environ[RUNTIME_DIR_ENV] = str(Path(fake) / "run")
@@ -123,6 +133,55 @@ def inner(args) -> int:
     from asusius.ui.app import AsusiusApp
     app = AsusiusApp()
     result: dict = {"renderer": args.renderer, "fake": bool(fake), "pid": os.getpid()}
+
+    def _cost_stats(costs: list[float]) -> dict:
+        s = sorted(costs)
+        return {"median_ms": round(s[len(s) // 2], 2), "tail_ms": round(s[-1], 2)}
+
+    def _idle_measures(win, seconds: float, label: str):
+        """RSS/PSS/private + idle CPU + sampler cost median/tail over one window."""
+        costs: list[float] = []
+        c0, t0 = cpu_s(), time.monotonic()
+        end = t0 + seconds
+        while time.monotonic() < end:
+            yield 1000
+            costs.append(win.hub.sampler.cost_ms)
+        c1, t1 = cpu_s(), time.monotonic()
+        result[label] = {**mem(), "cpu_pct": round(100 * (c1 - c0) / (t1 - t0), 2),
+                         "seconds": round(t1 - t0, 1), "processes": len(win.hub.procs),
+                         **_cost_stats(costs)}
+
+    def memory_steps(win):
+        """M5 A/B scenarios: dashboard fresh, Memory open, App memory open,
+        Processes defaults, Dashboard after leaving (parked), memory revisit."""
+        yield 5000  # startup settle
+        result["startup"] = mem()
+        yield int(args.warmup * 1000)
+        yield from _idle_measures(win, args.idle, "dashboard_fresh")
+        win.show_page("memory")
+        yield 4000  # first fill + settle
+        yield from _idle_measures(win, args.idle, "memory_open")
+        page = win.pages.get_built("memory")
+        if page is not None and hasattr(page, "qa_set_app_panel"):
+            page.qa_set_app_panel(True)  # app ranking + walks (~600 fake PIDs)
+        yield 6000  # first walk + ranking
+        yield from _idle_measures(win, args.idle, "memory_apps")
+        page = win.pages.get_built("memory")
+        close = getattr(page, "qa_set_app_panel", None)
+        if close is not None:  # close the panel before leaving
+            close(False)
+        win.show_page("processes")
+        yield 3000
+        yield from _idle_measures(win, 12.0, "processes")
+        win.show_page("dashboard")
+        yield 35_000  # park + trim (PARK_AFTER_S = 30)
+        yield int(args.warmup * 1000)
+        yield from _idle_measures(win, args.idle, "dashboard_after")
+        win.show_page("memory")
+        yield 3000
+        result["memory_revisit"] = {**mem()}
+        print(json.dumps(result, indent=1))
+        app.quit()
 
     def keyboard_steps(win):
         """Keyboard page CPU: hardware effect, static software effect, animated one."""
@@ -217,7 +276,9 @@ def inner(args) -> int:
         app.quit()
 
     def on_activate(_app):
-        it = (keyboard_steps if args.keyboard else steps)(app.window)
+        steps_fn = memory_steps if args.memory else (
+            keyboard_steps if args.keyboard else steps)
+        it = steps_fn(app.window)
 
         def tick():
             try:
@@ -241,6 +302,8 @@ def main() -> int:
     p.add_argument("--fake", action="store_true", help="fake hardware tree instead of real")
     p.add_argument("--keyboard", action="store_true",
                    help="only measure the Keyboard page (use with --fake, --idle 15)")
+    p.add_argument("--memory", action="store_true",
+                   help="M5 Memory A/B scenarios (use with --fake and --idle 10-15)")
     args = p.parse_args()
     if os.environ.get("TUF_MEASURE_CHILD"):
         return inner(args)
