@@ -70,6 +70,23 @@ def info_row(title: str, subtitle: str, icon: str = "dialog-information-symbolic
     return row
 
 
+def wrap_group_title(group: Adw.PreferencesGroup) -> None:
+    """Let a group title reflow beside its header controls on narrow screens."""
+    pending = [group]
+    while pending:
+        widget = pending.pop()
+        if isinstance(widget, Gtk.Label) and widget.has_css_class("heading"):
+            widget.set_wrap(True)
+            widget.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            widget.set_ellipsize(Pango.EllipsizeMode.NONE)
+            widget.set_lines(-1)
+            return
+        child = widget.get_first_child()
+        while child is not None:
+            pending.append(child)
+            child = child.get_next_sibling()
+
+
 def value_row(title: str, subtitle: str = "",
               numeric: bool = True) -> tuple[Adw.ActionRow, Gtk.Label]:
     row = Adw.ActionRow(title=title, subtitle=subtitle)

@@ -2,7 +2,7 @@
 # Copyright (C) Hamza Gouda
 from __future__ import annotations
 
-from gi.repository import Adw, Gdk, Gtk
+from gi.repository import Adw, Gdk, Gtk, Pango
 
 from ...core import KbdEffect
 from ..tasks import run_bg
@@ -28,6 +28,15 @@ def _rgba(rgb) -> Gdk.RGBA:
 
 def _rgb(rgba: Gdk.RGBA) -> tuple[int, int, int]:
     return (round(rgba.red * 255), round(rgba.green * 255), round(rgba.blue * 255))
+
+
+def _setup_effect_item(_factory, item) -> None:
+    item.set_child(Gtk.Label(xalign=0, wrap=True, wrap_mode=Pango.WrapMode.WORD_CHAR,
+                             max_width_chars=18))
+
+
+def _bind_effect_item(_factory, item) -> None:
+    item.get_child().set_text(item.get_item().get_string())
 
 
 class KeyboardPage(Page):
@@ -70,6 +79,10 @@ class KeyboardPage(Page):
         self.apply_btn.set_sensitive(False)
         self.fx.set_header_suffix(self.apply_btn)
         self.mode_row = Adw.ComboRow(title="Effect")
+        effect_factory = Gtk.SignalListItemFactory()
+        effect_factory.connect("setup", _setup_effect_item)
+        effect_factory.connect("bind", _bind_effect_item)
+        self.mode_row.set_factory(effect_factory)
         self.mode_row.set_subtitle_lines(0)
         self.swatch = EffectSwatch()
         self.swatch.set_tooltip_text("How the effect's colour moves")
