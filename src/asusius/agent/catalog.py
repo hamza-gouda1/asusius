@@ -3,6 +3,7 @@
 """Static tool catalogue, kept separate from call execution and handlers."""
 from __future__ import annotations
 
+
 def build_tools() -> dict:
     from .tools import (Tool, Capability, WRITE_PROPS, COLOUR, GPU_MODES, PROFILE_ENUM,
                         MODE_IDS, SPEEDS, DIRECTIONS, SECTION_ENUM, NAME_FILTER, obj, wobj,

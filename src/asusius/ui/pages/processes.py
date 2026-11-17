@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import os
 import signal
+
 from gi.repository import Adw, Gio, GLib, Gtk, Pango
+
 from ...telemetry import fmt
 from ...telemetry.app_memory import group_apps
 from ...telemetry.procs import alive, inspect_process, kill, set_priority
@@ -14,13 +16,26 @@ from ..viewmodels import OWN_APP_ID, signal_refusal
 from ..widgets import label
 from .base import a11y_name
 from .monitor_base import MonitorPage, set_text
-from .process_rows import (COLUMNS, _attach_header_tooltip, SORT_KEYS, INSPECT_MS, SECTION_APPS, SECTION_PROCS,
-                           SYSTEM_KEY, EXITED_TEXT, CHANGED_TEXT, INFO_ROWS, MEMORY_ROWS,
-                           VAL_MAX_CHARS, Row, _sum_opt, totals_for,
-                           installed_desktop_index, app_display_info)
 from .process_inspector import InspectorDialog, _fit_val, _HAS_ADW_DIALOG, _DIALOG_BASE
-
-
+from .process_rows import (
+    CHANGED_TEXT,
+    COLUMNS,
+    EXITED_TEXT,
+    INFO_ROWS,
+    INSPECT_MS,
+    MEMORY_ROWS,
+    SECTION_APPS,
+    SECTION_PROCS,
+    SORT_KEYS,
+    SYSTEM_KEY,
+    VAL_MAX_CHARS,
+    Row,
+    _attach_header_tooltip,
+    _sum_opt,
+    app_display_info,
+    installed_desktop_index,
+    totals_for,
+)
 
 
 def _ancestors(w):
@@ -28,6 +43,8 @@ def _ancestors(w):
     while p is not None:
         yield p
         p = p.get_parent()
+
+
 class ProcessesPage(MonitorPage):
     key, title = "processes", "Processes"
     rate_s = 1.0
