@@ -3,7 +3,10 @@
 Use this checklist on an ASUS laptop with Asusius 0.3.0 already installed from
 [the release](https://github.com/hamza-gouda1/asusius/releases/tag/v0.3.0).
 Installation time is separate. Run the commands as your desktop user in a terminal.
-Close the simulated demo and open the installed app for these checks.
+Close the simulated demo and open the installed app for these checks. Confirm the
+version in **About** is 0.3.0. In the collection terminal,
+`echo "${ASUSIUS_FAKE_ROOT:-}"` should print a blank line. If it prints a path, open
+a terminal outside the demo environment before collecting readings.
 
 ## Minutes 0–3 — save the baseline
 
@@ -36,8 +39,7 @@ printf 'Report directory %s\n' "$report_dir"
 
 The installed launcher may keep its Python package outside the system interpreter's
 search path. If the version command fails, copy the version from **About** into
-`environment.txt`. Confirm it is 0.3.0. Check that `ASUSIUS_FAKE_ROOT` is unset before
-collecting readings. If it is set, open a terminal outside the demo environment.
+`environment.txt`.
 
 ## Minutes 3–9 — inspect the real pages
 
