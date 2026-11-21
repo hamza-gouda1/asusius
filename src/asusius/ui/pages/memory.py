@@ -16,6 +16,7 @@ from gi.repository import Gdk, Gtk, Pango
 
 from ...telemetry import fmt
 from ..charts import Chart, Line, colour, value_at
+from ..viewmodels import fmt_temp
 from ..widgets import label
 from .monitor_base import MonitorPage, Panel, StatGrid, note, set_text
 
@@ -54,12 +55,12 @@ CHART_TIP = ("RAM history. Use Left and Right to inspect samples, Enter to pin, 
              "Escape to return to the latest sample. Click or tap also pins.")
 
 PRESSURE_LINES = (
-    Line("psi_some", "some", "primary", fill=False),
-    Line("psi_full", "full", "gold", fill=False, pattern=(3, 3)),
+    Line("psi_some", "Some", "primary", fill=False),
+    Line("psi_full", "Full", "gold", fill=False, pattern=(3, 3)),
 )
 SWAP_RATE_LINES = (
-    Line("pswpin_bps", "in", "slate", fill=False),
-    Line("pswpout_bps", "out", "gold", fill=False, pattern=(4, 3)),
+    Line("pswpin_bps", "In", "slate", fill=False),
+    Line("pswpout_bps", "Out", "gold", fill=False, pattern=(4, 3)),
 )
 
 
@@ -180,6 +181,12 @@ class MemoryPage(MonitorPage):
         self._sel = {line.key for line in BREAKDOWN_LINES}
         self._seg_guard = False
         self._app_open = False
+        self._fmt_in_use = fmt.sticky_bytes()
+        self._fmt_avail = fmt.sticky_bytes()
+        self._fmt_free = fmt.sticky_bytes()
+        self._fmt_swap_used = fmt.sticky_bytes()
+        self._fmt_swap_in = fmt.sticky_rate()
+        self._fmt_swap_out = fmt.sticky_rate()
         self._charts_store = self._mem_store()
         self.name, self.sub, _ = self.header("Memory", "")
 
@@ -190,7 +197,8 @@ class MemoryPage(MonitorPage):
         self.cards: dict[str, tuple[Gtk.Label, Gtk.Label]] = {}
         for key, cap, tip in (("in_use", "In use", "Total minus available memory"),
                               ("available", "Available",
-                               "The kernel's estimate of RAM usable without swapping"),
+                               "Usable without swapping (includes reclaimable file cache; "
+                               "free is completely unused RAM)"),
                               ("pressure", "Memory pressure",
                                "Share of time some tasks stalled for memory (PSI)"),
                               ("swap", "Swap used", None)):
@@ -287,7 +295,7 @@ class MemoryPage(MonitorPage):
 
     def _build_pressure_card(self) -> None:
         p = Panel("Pressure & swap")
-        self.sample_badge = label("Selected sample", ("pill", "dim-label"),
+        self.sample_badge = label("Selected sample", ("pill", "dim"),
                                   valign=Gtk.Align.CENTER)
         p.suffix_box.append(self.sample_badge)
         self.pressure_vals: dict[str, Gtk.Label] = {}
@@ -498,8 +506,7 @@ class MemoryPage(MonitorPage):
             return
         self.range_s = secs
         for c in self._mem_charts:
-            c.window_s = secs
-            c.queue_draw()
+            c.set_window(secs)
         self.pin_ts = None
         self.hover_ts = None
         self._refresh_readout()
@@ -635,10 +642,11 @@ class MemoryPage(MonitorPage):
 
     def _ram_key(self, _c, keyval, _code, _state) -> bool:
         if keyval == Gdk.KEY_Escape:
-            if self.pin_ts is not None or self.hover_ts is not None:
-                self.pin_ts = None
-                self.hover_ts = None
-                self._refresh_readout()
+            if self.pin_ts is None and self.hover_ts is None:
+                return False
+            self.pin_ts = None
+            self.hover_ts = None
+            self._refresh_readout()
             return True
         st = self._mem_store()
         cur = self._selected_ts(st)
@@ -763,8 +771,11 @@ class MemoryPage(MonitorPage):
         swap_used = value_at(st, "swap_used", sel, RING_CADENCE)
         set_text(self.pressure_vals["some"], fmt.pct(some, 2))
         set_text(self.pressure_vals["full"], fmt.pct(full, 2))
-        set_text(self.pressure_vals["in"], fmt.rate(pin_bps))
-        set_text(self.pressure_vals["out"], fmt.rate(pout_bps))
+        live = at_latest and not pinned
+        set_text(self.pressure_vals["in"],
+                 self._fmt_swap_in(pin_bps) if live else fmt.rate(pin_bps))
+        set_text(self.pressure_vals["out"],
+                 self._fmt_swap_out(pout_bps) if live else fmt.rate(pout_bps))
         # consistent with the summary card: feature-off is not a zero reading
         swap_total = value_at(st, "swap_total", sel, RING_CADENCE)
         set_text(self.swap_used_val, "no swap configured" if swap_total == 0
@@ -774,6 +785,9 @@ class MemoryPage(MonitorPage):
             c.set_cursor_ts(sel)
 
     # -- live update -----------------------------------------------------------------------
+
+    def refresh_temperature_unit(self) -> None:
+        self.update()
 
     def update(self) -> None:
         """Per-sample refresh: summary cards, axes, details and the cursor readout.
@@ -795,29 +809,30 @@ class MemoryPage(MonitorPage):
                 c.store = st
         # header
         err = m.get("error")
+        pct_used = fmt.pct(100 * in_use / total) if total and in_use is not None else "–"
         if total:
-            pct_txt = f"{100 * in_use / total:.0f} %" if in_use is not None else "–"
             set_text(self.sub, f"{fmt.bytes_(total)} usable · {fmt.bytes_(in_use)} in use "
-                               f"({pct_txt})")
+                               f"({pct_used})")
         else:
             set_text(self.sub, (err or "No data yet") if not m else "Total unavailable")
         # 1 summary cards: measured zero / absent / feature-off stay distinct
         card = self.cards
-        set_text(card["in_use"][0], fmt.bytes_(in_use))
+        set_text(card["in_use"][0], self._fmt_in_use(in_use))
         set_text(card["in_use"][1],
-                 f"{100 * in_use / total:.0f}% of usable RAM"
+                 f"{pct_used} of usable RAM"
                  if total and in_use is not None else "–")
-        set_text(card["available"][0], fmt.bytes_(m.get("available")))
+        set_text(card["available"][0], self._fmt_avail(m.get("available")))
         free = m.get("free")
         set_text(card["available"][1],
-                 f"{fmt.bytes_(free)} free" if free is not None else "–")
+                 f"{self._fmt_free(free)} free" if free is not None else "–")
         some10 = (psi or {}).get("some", {}).get("avg10") if psi else None
         set_text(card["pressure"][0], fmt.pct(some10, 2))
         sub = "Some tasks · 10 s avg" if some10 is not None else "PSI unavailable"
         set_text(card["pressure"][1], sub)
         swap_total = m.get("swap_capacity_bytes", m.get("swap_total"))
         if swap_total:
-            set_text(card["swap"][0], fmt.bytes_(m.get("swap_used_bytes", m.get("swap_used"))))
+            swap_used = m.get("swap_used_bytes", m.get("swap_used"))
+            set_text(card["swap"][0], self._fmt_swap_used(swap_used))
             set_text(card["swap"][1], f"of {fmt.bytes_(swap_total)} configured")
         else:
             set_text(card["swap"][0], "no swap configured" if swap_total == 0 else "–")
@@ -871,7 +886,7 @@ class MemoryPage(MonitorPage):
         g.set("committed", f"{fmt.bytes_(m.get('committed'))} of "
                            f"{fmt.bytes_(m.get('commit_limit'))}", COMMIT_TIP)
         d = self.hub.store.last("temp.dimm0")
-        g.set("dimm", fmt.temp(d) if d is not None else "no sensor")
+        g.set("dimm", fmt_temp(d) if d is not None else "no sensor")
         some = (psi or {}).get("some") or {}
         full = (psi or {}).get("full") or {}
         g.set("psi_some60", fmt.pct(some.get("avg60"), 2))
@@ -898,6 +913,49 @@ class MemoryPage(MonitorPage):
             self._legend_cols = legend_cols
             self._rebuild_legend()
             self._refresh_readout()
+
+    def save_state(self) -> dict:
+        panel = self._app_panel_widget()
+        return {
+            "view": self.view,
+            "range_s": self.range_s,
+            "sel": set(self._sel),
+            "comp_open": self.comp_toggle.get_active(),
+            "det_open": self.det_toggle.get_active(),
+            "app_open": self.app_toggle.get_active(),
+            "app_mode": getattr(panel, "_mode", None) if panel is not None else None,
+        }
+
+    def restore_state(self, state: dict) -> None:
+        if not state:
+            return
+        sel = state.get("sel")
+        valid_sel = {line.key for line in BREAKDOWN_LINES}
+        if isinstance(sel, (set, list, tuple)):
+            kept = set(sel) & valid_sel
+            if kept:
+                self._sel = kept
+        range_s = state.get("range_s")
+        if range_s in self.range_btns:
+            self.range_btns[range_s].set_active(True)
+        view = state.get("view")
+        if view in self.view_btns:
+            self.view_btns[view].set_active(True)
+        if self.view == "breakdown":
+            self.ram_chart.set_lines([line for line in BREAKDOWN_LINES if line.key in self._sel])
+            self._rebuild_legend()
+            self._refresh_readout()
+        if "comp_open" in state:
+            self.comp_toggle.set_active(bool(state["comp_open"]))
+        if "det_open" in state:
+            self.det_toggle.set_active(bool(state["det_open"]))
+        if state.get("app_open"):
+            self.app_toggle.set_active(True)
+            panel = self._app_panel_widget()
+            mode = state.get("app_mode")
+            if panel is not None and mode in ("size", "growth"):
+                btn = panel.growth_btn if mode == "growth" else panel.size_btn
+                btn.set_active(True)
 
     def on_shown(self) -> None:
         super().on_shown()

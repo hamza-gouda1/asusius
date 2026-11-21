@@ -49,7 +49,6 @@ from asusius.telemetry.ring import Store  # noqa: E402
 from asusius.ui.charts import Chart, Line, value_at  # noqa: E402
 from asusius.ui.pages.memory import (  # noqa: E402
     BREAKDOWN_LINES, DEFAULT_RANGE, MemoryPage, USAGE_LINES, ddr_text, zram_line)
-from asusius.ui.viewmodels import nb  # noqa: E402
 
 GIB = 1 << 30
 
@@ -172,7 +171,7 @@ class SummaryTests(WidgetCase):
     def test_populated_cards(self):
         page = make_page()
         self.assertEqual(txt(page.cards["in_use"][0]), fmt.bytes_(8 * GIB))
-        self.assertEqual(txt(page.cards["in_use"][1]), "50% of usable RAM")
+        self.assertEqual(txt(page.cards["in_use"][1]), f"{fmt.pct(50)} of usable RAM")
         self.assertEqual(txt(page.cards["available"][1]), f"{fmt.bytes_(1 * GIB)} free")
         self.assertEqual(txt(page.cards["pressure"][0]), fmt.pct(0.12, 2))
         self.assertEqual(txt(page.cards["swap"][0]), fmt.bytes_(112 << 20))
@@ -666,7 +665,12 @@ class RamChartDrawTests(WidgetCase):
 
     def _ticks(self, page) -> list[float]:
         seen: list[float] = []
-        page.ram_chart.fmt = lambda v: (seen.append(v), "x")[1]
+
+        def _fmt(v):
+            seen.append(v)
+            return "x"
+
+        page.ram_chart.fmt = _fmt
         draw_chart(page.ram_chart)
         return seen
 

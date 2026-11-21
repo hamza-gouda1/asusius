@@ -27,6 +27,7 @@ from .widgets import label
 ROW_LIMIT = 5          # up to five app groups, by size or growth
 OWNER = APP_MEMORY_OWNER
 DASH = fmt.DASH
+_UNSET = object()
 
 
 class AppMemoryPanel(Gtk.Box):
@@ -82,6 +83,8 @@ class AppMemoryPanel(Gtk.Box):
         self.append(head)
         self.rows_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.append(self.rows_box)
+        self._row_pool: list[dict] = []
+        self._empty_label = label(DASH, ("section-caption",))
         self.note = label("", ("section-caption", "numeric"), wrap=True,
                           wrap_mode=Pango.WrapMode.WORD_CHAR)
         self.note.set_visible(False)
@@ -197,8 +200,73 @@ class AppMemoryPanel(Gtk.Box):
         dindex = self._dindex
         return app_display_info(app_id, launched, self._name_cache, dindex)
 
+    def _make_row_slot(self) -> dict:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        line = Gtk.Box(spacing=8)
+        img = Gtk.Image(pixel_size=16)
+        line.append(img)
+        name_lab = label("", hexpand=True, ellipsize=Pango.EllipsizeMode.END)
+        line.append(name_lab)
+        size_lab = label("", ("numeric",), xalign=1.0)
+        line.append(size_lab)
+        growth_lab = label("", ("numeric",), xalign=1.0, width_chars=9)
+        line.append(growth_lab)
+        box.append(line)
+        cap_lab = label("", ("section-caption",), wrap=True,
+                        wrap_mode=Pango.WrapMode.WORD_CHAR)
+        cap_lab.set_visible(False)
+        box.append(cap_lab)
+        return {
+            "box": box, "img": img, "name": name_lab, "size": size_lab,
+            "growth": growth_lab, "cap": cap_lab, "icon": _UNSET,
+        }
+
+    @staticmethod
+    def _set_label_and_tip(lab: Gtk.Label, text: str, tip: str | None = None) -> None:
+        if lab.get_label() != text:
+            lab.set_label(text)
+        if tip is not None and lab.get_tooltip_text() != tip:
+            lab.set_tooltip_text(tip)
+
+    def _fill_row_slot(self, slot: dict, tracker, row, info) -> None:
+        name, icon = info
+        n = tracker.member_count(row.app_id) if tracker is not None else 0
+        img = slot["img"]
+        if icon is not None:
+            prev = slot["icon"]
+            same = prev is icon or (prev is not _UNSET and prev is not None
+                                    and hasattr(prev, "equal") and prev.equal(icon))
+            if not same:
+                img.set_from_gicon(icon)
+                slot["icon"] = icon
+            if not img.get_visible():
+                img.set_visible(True)
+        else:
+            slot["icon"] = None
+            if img.get_visible():
+                img.set_visible(False)
+        title_txt = f"{name}  ({n})" if n > 1 else str(name)
+        self._set_label_and_tip(slot["name"], title_txt, title_txt)
+        size_txt = fmt.bytes_(row.size_bytes) + ("  ≈" if row.partial else "")
+        size_tip = ("Approximate private memory; ≈: some members could only be "
+                    "measured as RSS (statm unreadable)"
+                    if row.partial else
+                    "Approximate private memory (statm resident-shared)")
+        self._set_label_and_tip(slot["size"], size_txt, size_tip)
+        self._set_label_and_tip(slot["growth"], self._growth_text(row),
+                                self._growth_tip(row))
+        caption = self._caption(row)
+        cap_lab = slot["cap"]
+        if caption:
+            if cap_lab.get_label() != caption:
+                cap_lab.set_label(caption)
+            if not cap_lab.get_visible():
+                cap_lab.set_visible(True)
+        elif cap_lab.get_visible():
+            cap_lab.set_visible(False)
+
     def refresh(self) -> None:
-        """Rebuild the rows from the tracker's latest ranking.
+        """Update rows in place from the tracker's latest ranking.
 
         Rows are taken in ranking order until ROW_LIMIT RECOGNIZED groups fill the
         panel: a group that resolves to no display info (no .desktop file and no
@@ -213,16 +281,27 @@ class AppMemoryPanel(Gtk.Box):
                 rows.append((row, info))
                 if len(rows) >= ROW_LIMIT:
                     break
-        child = self.rows_box.get_first_child()
-        while child is not None:
-            nxt = child.get_next_sibling()
-            self.rows_box.remove(child)
-            child = nxt
         if not rows:
-            self.rows_box.append(label(DASH if not self._open else "Reading processes…",
-                                       ("section-caption",)))
-        for row, info in rows:
-            self.rows_box.append(self._row(tracker, row, info))
+            for slot in self._row_pool:
+                if slot["box"].get_parent() is self.rows_box:
+                    self.rows_box.remove(slot["box"])
+            empty_txt = DASH if not self._open else "Reading processes…"
+            if self._empty_label.get_label() != empty_txt:
+                self._empty_label.set_label(empty_txt)
+            if self._empty_label.get_parent() is not self.rows_box:
+                self.rows_box.append(self._empty_label)
+        else:
+            if self._empty_label.get_parent() is self.rows_box:
+                self.rows_box.remove(self._empty_label)
+            while len(self._row_pool) < len(rows):
+                self._row_pool.append(self._make_row_slot())
+            for slot, (row, info) in zip(self._row_pool, rows):
+                self._fill_row_slot(slot, tracker, row, info)
+                if slot["box"].get_parent() is not self.rows_box:
+                    self.rows_box.append(slot["box"])
+            for slot in self._row_pool[len(rows):]:
+                if slot["box"].get_parent() is self.rows_box:
+                    self.rows_box.remove(slot["box"])
         if tracker is not None and tracker.coverage == "partial":
             self.note.set_text("Growth tracking limit reached. Some comparisons are unavailable.")
             self.note.set_visible(True)
@@ -239,40 +318,6 @@ class AppMemoryPanel(Gtk.Box):
             text = fmt.bytes_(row.growth_bytes)
             return f"+{text}" if row.growth_bytes >= 0 else text
         return "New" if row.is_new else DASH
-
-    def _row(self, tracker, row, info) -> Gtk.Box:
-        name, icon = info
-        n = tracker.member_count(row.app_id) if tracker is not None else 0
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
-        line = Gtk.Box(spacing=8)
-        img = Gtk.Image(pixel_size=16)
-        if icon is not None:
-            img.set_from_gicon(icon)
-        else:
-            img.set_visible(False)
-        line.append(img)
-        name_lab = label(f"{name}  ({n})" if n > 1 else str(name), hexpand=True,
-                         ellipsize=Pango.EllipsizeMode.END,
-                         tooltip_text=f"{name}  ({n})" if n > 1 else str(name))
-        line.append(name_lab)
-        size_lab = label(fmt.bytes_(row.size_bytes) + ("  ≈" if row.partial else ""),
-                         ("numeric",), xalign=1.0)
-        size_lab.set_tooltip_text("Approximate private memory; ≈: some members could "
-                                  "only be measured as RSS (statm unreadable)"
-                                  if row.partial else
-                                  "Approximate private memory (statm resident-shared)")
-        line.append(size_lab)
-        growth_lab = label(self._growth_text(row), ("numeric",), xalign=1.0,
-                           width_chars=9)
-        growth_lab.set_tooltip_text(self._growth_tip(row))
-        line.append(growth_lab)
-        box.append(line)
-        caption = self._caption(row)
-        if caption:
-            cap_lab = label(caption, ("section-caption",), wrap=True,
-                            wrap_mode=Pango.WrapMode.WORD_CHAR)
-            box.append(cap_lab)
-        return box
 
     def _caption(self, row) -> str:
         parts = []
