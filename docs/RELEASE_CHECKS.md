@@ -1,21 +1,29 @@
 # Release checks
 
-Reviewed on 2026-11-04. The check uses fake hardware and recorded system-service
+Reviewed on 2026-11-21. The check uses fake hardware and recorded system-service
 transactions; no package updates, firmware flashes or hardware writes were performed.
 
-- Unit suite: 486 tests run, two intentional skips.
-- Full UI matrix: all 21 pages, dialogs and transient states across 27 combinations
-  (five sizes, three themes, and six stress modes at two sizes). Zero failures and
-  warnings; 42 grouped informational notes record shortened labels with tooltips.
-  The matrix combines sequential bounded runs and affected-case reruns after fixes.
+- Unit suite: 1099 discovered tests run (2 intentional skips), plus 45 standalone tests in
+  `tests/test_updates.py`.
+- Full UI matrix: `tests/ui/qa_lint.py` covers all 21 pages, dialogs and transient states across
+  58 combinations (five sizes, three themes, and 17 stress modes; 4 combinations in `--quick`).
+  The UI geometry, page metadata, widget polish, page, and QA logic tests pass in the unit suite;
+  GitHub Actions runs `--quick` on push/PR and the full matrix on manual dispatch or schedule.
 - Installer: temporary-home round trips, original asset/service restoration, and
-  literal paths containing shell-special characters pass.
-- Extension logic: 36 profile assertions and 293 gesture assertions pass.
+  literal paths containing shell-special characters pass (`tests/test_install.sh`).
+- Extension logic: 43 profile assertions (`tests/test_quick_profiles.js`), 363 gesture
+  assertions across `tests/test_gestures.js` (42 desktop drag, 23 app drag, 32 gesture session,
+  266 gesture logic), 23 standalone assertions in `tests/test_app_drag.js`, and ES module syntax
+  checks across all 10 extension files pass.
 - Focused Shell QA covers reversible desktop travel, app switching, overview handoff,
   reduced motion and media dispatch, using existing window actors.
-- Desktop entry and AppStream metadata validate; extension schemas validate.
-- ShellCheck and Python syntax checks pass. Ruff is unavailable locally; its CI
-  job must pass after publishing before a release is announced.
+- Extension schemas validate (`glib-compile-schemas --strict --dry-run`); packaging metadata and
+  version-sync unit tests pass locally, while `desktop-file-validate` and `appstreamcli` run in
+  the CI `packaging` job.
+- Python AST/tokenize parity checks for Ruff `select = ["E", "F"]` (`src`, `tests`, `tools`) pass
+  locally with zero issues; `ruff` and `shellcheck` were not installed in the audit sandbox and are
+  enforced on GitHub Actions alongside Python 3.13 pure-Python tests and release build provenance
+  attestation.
 - Tracked-text scan found no real home paths or obvious credential patterns.
 
 Update results use installed versions read before and after a transaction. Firmware
@@ -55,3 +63,15 @@ immutable.
 - **`v0.2.0` GitHub Release (`7b0caa3`)**: superseded by **`v0.2.1`**, with `v0.2.0`
   release notes updated to reference `asusius-0.2.0.tar.gz` and its matching SHA-256.
 - **GitHub Issue `#3`**: updated to instruct testers to run `asusius capabilities --json`.
+
+### Audit & CI hardening notes (`v0.3.0`, 2026-11-21)
+
+- Fixed telemetry unit churn (`fmt.sticky_bytes`, `fmt.sticky_rate`, pre-threshold rounding),
+  fan-key collisions in `sensors.py`, `CoreGrid` `°F` formatting, and Battery range-chip toggle guard
+  plus keyboard history navigation.
+- Hardened D-Bus connect timeouts, update lockfile permissions (`0o700`/`0o600`), scheduler lock
+  separation, read-only `dry_run` write validation, sysfs/proc/NVML/MCP edge cases, UI parked-page
+  state preservation, and GNOME 49 Shell feature detection.
+- Upgraded CI/release workflows (`concurrency`, Python 3.13 pure-Python leg, PR/push `--quick` UI QA
+  gate, pre-release Ruff + unit test gates, and build provenance attestation) and expanded
+  `[tool.ruff.lint]` to `select = ["E", "F"]` across `src`, `tests`, and `tools`.

@@ -21,17 +21,21 @@ otherwise the system preference is followed.
 | File | Role |
 | --- | --- |
 | `app.py` | `Adw.Application` (`io.github.hamzagouda.Asusius`), styles, icon path, `main()` |
-| `window.py` | `Adw.NavigationSplitView` sidebar (Monitor / Control sections) + `Gtk.Stack`; pages imported and built on first visit (`LazyPages`), hidden monitor pages destroyed after 30 s; header profile chip and battery indicator, toasts, confirm dialogs |
+| `window.py` | `Adw.NavigationSplitView` sidebar (Monitor / Control sections) + `Gtk.Stack`; pages imported and built on first visit (`LazyPages`), hidden monitor pages destroyed after 30 s while preserving UI state (filters/view/selection) across rebuilds; header profile chip and battery indicator, toasts, confirm dialogs |
 | `live.py` | `LiveHub`: the one telemetry timer (1 Hz, 2 Hz on a detail page, stopped while the window is hidden) over `asusius.telemetry.Sampler`; process walk only while Processes is visible |
-| `charts.py`, `chartmath.py` | Cairo `Chart` (axes, grid, time axis, hover readout, stacked areas), `CoreGrid`, `CompositionBar`, `Meter`; display-free windowing, downsampling and monotone curves |
+| `charts.py`, `chartmath.py` | Cairo `Chart` (axes, grid, time axis, hover readout, stacked areas), `CoreGrid`, `Meter`; display-free windowing, downsampling and monotone curves |
+| `history_chart.py` | Cairo UPower `HistoryChart` (hover + keyboard cursor) for battery charge/rate/discharge history |
+| `app_memory.py`, `disk_map.py` | `AppMemoryPanel` (grouped RSS + growth tracking) and interactive treemap/disk-usage analyzer (`DiskUsageChart`) |
 | `lean.py` | Cairo renderer by default (`ASUSIUS_RENDERER=gl` to change), `malloc_trim`; see [PERFORMANCE.md](PERFORMANCE.md) |
-| `viewmodels.py` | Display-free logic: formatting, `History`, power-limit view, `FanCurveModel` (clamped drags), `CurveGeometry`, GPU/keyboard/battery helpers, Mutter state parsing |
-| `widgets.py` | `Sparkline`, `Tile`, `FanCurveCanvas`, `KeyboardPreview` (Cairo) |
+| `prefs.py` | Persistent UI preferences (such as `°C` / `°F` temperature unit and sidebar/disk-analyzer state) |
+| `viewmodels.py`, `viewmodels_*.py` | Display-free logic: `viewmodels.py` is the compatibility facade over the `viewmodels_*.py` submodules (formatting, `History`, power-limit view, `FanCurveModel`, `CurveGeometry`, GPU/keyboard/display/battery/hardware helpers) |
+| `widgets.py` | `label`, `FanCurveCanvas`, `KeyboardPreview`, `EffectSwatch`, `PaletteSwatch`, `palette_buttons` (Cairo) |
 | `display_config.py` | `org.gnome.Mutter.DisplayConfig` client (async Gio) and an in-memory fake |
 | `tasks.py` | `run_bg()`: worker pool (`backends.pool.run_async`) -> result via `GLib.idle_add` |
 | `theme.py`, `style.css`, `style-dark.css` | Wine palette, Geist Mono detection, dark overlay |
-| `monitor.css` | Monitor pages (cards, stat cells, process table); named colours only |
-| `pages/` | One module per page |
+| `style-popover.css`, `style-popover-dark.css` | Rounded popover/dropdown surface overrides above user `gtk.css` |
+| `monitor.css`, `system.css` | Monitor pages (cards, stat cells, process table) and systemd/service styling; named colours only |
+| `pages/` | One module per page (`cpu.py`, `memory.py`, `gpu_monitor.py`, `fanmon.py`, `services.py`, etc.) plus shared helpers (`monitor_base.py`, `process_rows.py`, `process_inspector.py`) |
 
 `data/`: desktop file, metainfo, scalable app icon.
 
@@ -80,15 +84,17 @@ by systemd scope plus one "System processes" group, or all processes; columns CP
 Swap (VmSwap), Drive (read + write), GPU, GPU memory and PID, each header carrying the
 machine-wide figure like Mission Center; sort, filter; Stop = SIGTERM and Force Stop =
 SIGKILL, both confirmed, refused for PID 1 and Asusius itself; app names and icons come
-from the cgroup scope, the .desktop id, StartupWMClass or the executable), Processor (stacked
-user/system/iowait, 24-CPU
+from the cgroup scope, the .desktop id, StartupWMClass or the executable), Services (system
+and user systemd units, search/filter/sort, and safe polkit-mediated start/stop/restart/enable/disable
+actions), Processor (stacked user/system/iowait, 24-CPU
 grid with P/E cores, clock, temperatures, load, governor/EPP), Memory (in use / cache stack,
-composition bar, swap, zswap, pressure), NVIDIA graphics and Intel graphics (utilisation,
+sample pinning, `App memory` per-app RSS and growth tracking, swap, zswap, pressure),
+NVIDIA graphics and Intel graphics (utilisation,
 clocks, temperature, power, VRAM, engines, processes; sleeping state; a dGPU whose runtime PM
 state is `error` shows "GPU unavailable: the NVIDIA driver lost the GPU" and is never polled),
 Fans & temps (both fans,
 all temperature sensors, link to Fan curves), Storage (per-disk rates, busy, temperature,
-file systems), Network (per-interface rates; virtual interfaces hidden by default).
+file systems, interactive disk-usage analyzer), Network (per-interface rates; virtual interfaces hidden by default).
 
 Graph axes never move with the data: percentages are 0 to 100, memory and VRAM 0 to the
 total, temperatures 20 to 100 degrees, fans 0 to 7k rpm; the rest (rates, clocks, power) start
@@ -101,7 +107,8 @@ pending-restart banner),
 Display (refresh rate, panel overdrive, VRR note), Touchpad & gestures (touchpad
 send-events, tap to click, natural scrolling, speed, click method; swipe and pinch bindings
 for the Quick Settings extension's gestures, off by default; see [GESTURES.md](GESTURES.md)),
-Battery (charge limit 20–100 with 60/80/100 presets, one-shot full charge, health), Keyboard (brightness, hardware effect, live preview,
+Battery (charge limit 20–100 with 60/80/100 presets, one-shot full charge, health, UPower
+history chart), Keyboard (brightness, hardware effect, live preview,
 software effects: picker, parameters, simulated preview, service status; see
 [EFFECTS.md](EFFECTS.md)), Automation (asusiusd service, rules with enable switches and an
 "Active" badge, add/edit dialog with a dry-run Test, suggestions, recent activity; see
@@ -168,12 +175,16 @@ The matrix also drives a fake Updates transaction, checking the running progress
 version-verified pending result and expanded history at each normal size. The `gpu-lost`
 stress mode forces a PCI runtime error with no NVML backend to check recovery advice.
 
-Matrix: sizes 1920x1080 (maximised), 1280x720, 900x700, 640x700, 360x640; variants `dark`,
-`light` and `usertheme` (dark with the real `~/.config/gtk-4.0/gtk.css` and `settings.ini`,
-read-only); extra modes at 1280x720 and 640x700: `rtl`, `scale` (text scaling 1.5), `long`
-(80-character process names, very long GPU, disk and mount names), `empty` (no sensors, battery,
-dGPU or ASUS firmware) and `ppt` (readable power limits). It writes `tests/ui/qa_report.md`
-(findings grouped by kind with the combinations they occur in) and exits 1 on any failure.
+Matrix (`tests/ui/qa_lint.py` — 58 combinations total; `--quick` runs 4): sizes `1920x1080`
+(maximised), `1280x720`, `900x700`, `640x700`, `360x640`; variants `dark`, `light` and
+`usertheme` (dark with the real `~/.config/gtk-4.0/gtk.css` and `settings.ini`, read-only);
+plus 17 stress modes across `1280x720`/`640x700`/`360x640`: `rtl`, `scale` (text scaling 1.5),
+`long` (80-character process names, very long GPU, disk and mount names), `empty` (no sensors,
+battery, dGPU or ASUS firmware), `ppt` (readable power limits), `gpu-lost`, seven UPower
+battery states (`bat-hist`, `bat-short`, `bat-empty`, `bat-charging`, `bat-periph`, `bat-multi`,
+`bat-nodev`), and four Memory page states (`mem-default`, `mem-pin`, `mem-missing`, `mem-apps`,
+plus `mem-apps@scale`). It writes `tests/ui/qa_report.md` (findings grouped by kind with the
+combinations they occur in) and exits 1 on any failure.
 
 Checks: GTK/Adwaita/GLib warnings on stderr (harness noise is allow-listed in `qa_core.py`);
 labels ellipsized without a tooltip or clipped; widgets outside the window, their parent or a
