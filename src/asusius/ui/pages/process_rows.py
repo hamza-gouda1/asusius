@@ -35,6 +35,27 @@ MEMORY_ROWS = (("rss", "Resident"), ("hwm", "Peak"), ("private", "Private"),
 VAL_MAX_CHARS = 26  # value labels cap their natural width so the dialog stays shrinkable
 _VAL_START_ELLIPSIZE = {"cgroup"}  # paths read tail-first: keep the leaf unit visible
 
+COLUMNS = [  # key, title, width chars, tooltip
+    ("name", "Name", 0, None),
+    ("pid", "PID", 6, None),
+    ("cpu", "CPU", 6, "Share of the whole processor (all logical CPUs = 100 %)"),
+    ("mem", "Memory", 8, "Private memory: resident minus shared pages (statm)"),
+    ("swap", "Swap", 8, "Swapped-out memory of the process (VmSwap in /proc/PID/status)"),
+    ("disk", "Drive", 9, "Read + write at the storage layer, per second (your processes only)"),
+    ("gpu", "GPU", 5, "Busiest engine on the iGPU (DRM fdinfo) or dGPU"),
+    ("vram", "GPU memory", 9, "dGPU memory"),
+]
+
+
+def _attach_header_tooltip(header) -> None:
+    """Attach the explanatory column text to its visible title label."""
+    title = header.get_text().split("\n")[0]
+    for _key, column_title, _chars, tip in COLUMNS:
+        if column_title == title:
+            if tip:
+                header.set_tooltip_text(tip)
+            return
+
 
 def totals_for(procs) -> dict[str, str]:
     """Header second lines: sums over the displayed process set.
@@ -61,6 +82,8 @@ def totals_for(procs) -> dict[str, str]:
         "gpu": fmt.pct(min(100.0, sum(gpus)), 0) if gpus else fmt.DASH,
         "vram": fmt.bytes_(sum(vrams)) if vrams else fmt.DASH,
     }
+
+
 def _sum_opt(values) -> int | None:
     vals = [v for v in values if v is not None]
     return sum(vals) if vals else None
@@ -126,6 +149,8 @@ def app_display_info(app_id: str, launched: bool = True, cache: dict | None = No
         found = (base.replace("-", " ").replace("_", " ").strip().title() or app_id, None)
     cache[app_id] = found
     return found
+
+
 class Row(GObject.Object):
     __gtype_name__ = "AsusiusProcRow"
 

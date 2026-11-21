@@ -277,7 +277,7 @@ class Sections(unittest.TestCase):
         self.assertEqual(kids[0].count, 2)
         self.assertEqual([k.pid for k in p.sections[SECTION_PROCS].children],
                          [2, 10, 11, 20])  # every listed process, flat
-        self.assertEqual(summary_text(p), "1 apps · 4 of 4 processes · CPU 7.0 %")
+        self.assertEqual(summary_text(p), "1 app · 4 of 4 processes · CPU 7.0 %")
 
     def test_app_children_and_flat_rows_are_distinct_instances(self):
         p = fake_page(web_procs())
@@ -306,7 +306,7 @@ class Sections(unittest.TestCase):
         self.assertEqual(p2.sections[SECTION_APPS].name, "Apps (1)")
         self.assertEqual(p2.sections[SECTION_APPS].children[0].count, 2)  # whole group
         self.assertEqual([k.pid for k in p2.sections[SECTION_PROCS].children], [10, 11])
-        self.assertEqual(summary_text(p2), "1 apps · 2 of 4 processes · CPU 4.0 %")
+        self.assertEqual(summary_text(p2), "1 app · 2 of 4 processes · CPU 4.0 %")
 
     def test_search_without_matches_empties_both_sections(self):
         p = fake_page(web_procs(), search="zzz")
@@ -1027,7 +1027,7 @@ class SortBy(unittest.TestCase):
         kids = p.sections[SECTION_APPS].children
         self.assertEqual([k.key for k in kids], [APP, SYSTEM_KEY])  # pseudo-group last
         self.assertEqual(kids[0].count, 2)
-        self.assertEqual(summary_text(p), "1 apps · 4 of 4 processes · CPU 7.0 %")
+        self.assertEqual(summary_text(p), "1 app · 4 of 4 processes · CPU 7.0 %")
 
 
 if __name__ == "__main__":

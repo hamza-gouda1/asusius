@@ -6,58 +6,35 @@ from __future__ import annotations
 import os
 import signal
 
-from gi.repository import Adw, Gio, GLib, Gtk, Pango
+from gi.repository import Gio, GLib, Gtk, Pango
 
 from ...telemetry import fmt
 from ...telemetry.app_memory import group_apps
-from ...telemetry.procs import alive, inspect_process, kill, set_priority
+from ...telemetry.procs import alive, inspect_process, kill, set_priority as set_priority
 from ..tasks import run_bg
 from ..viewmodels import OWN_APP_ID, signal_refusal
 from ..widgets import label
 from .base import a11y_name
 from .monitor_base import MonitorPage, set_text
-from .process_inspector import InspectorDialog, _fit_val, _HAS_ADW_DIALOG, _DIALOG_BASE
+from .process_inspector import InspectorDialog, _HAS_ADW_DIALOG
 from .process_rows import (
-    CHANGED_TEXT,
-    EXITED_TEXT,
-    INFO_ROWS,
+    CHANGED_TEXT as CHANGED_TEXT,
+    COLUMNS as COLUMNS,
+    EXITED_TEXT as EXITED_TEXT,
+    INFO_ROWS as INFO_ROWS,
     INSPECT_MS,
-    MEMORY_ROWS,
+    MEMORY_ROWS as MEMORY_ROWS,
     SECTION_APPS,
     SECTION_PROCS,
     SORT_KEYS,
     SYSTEM_KEY,
-    VAL_MAX_CHARS,
     Row,
+    _attach_header_tooltip as _attach_header_tooltip,
     _sum_opt,
     app_display_info,
     installed_desktop_index,
     totals_for,
 )
-
-
-COLUMNS = [  # key, title, width chars, tooltip
-    ("name", "Name", 0, None),
-    ("pid", "PID", 6, None),
-    ("cpu", "CPU", 6, "Share of the whole processor (all logical CPUs = 100 %)"),
-    ("mem", "Memory", 8, "Private memory: resident minus shared pages (statm)"),
-    ("swap", "Swap", 8, "Swapped-out memory of the process (VmSwap in /proc/PID/status)"),
-    ("disk", "Drive", 9, "Read + write at the storage layer, per second (your processes only)"),
-    ("gpu", "GPU", 5, "Busiest engine on the iGPU (DRM fdinfo) or dGPU"),
-    ("vram", "GPU memory", 9, "dGPU memory"),
-]
-
-
-
-def _attach_header_tooltip(header) -> None:
-    """Attach the explanatory column text to its visible title label."""
-    title = header.get_text().split("\n")[0]
-    for _key, column_title, _chars, tip in COLUMNS:
-        if column_title == title:
-            if tip:
-                header.set_tooltip_text(tip)
-            return
-
 
 
 def _ancestors(w):
@@ -152,6 +129,7 @@ class ProcessesPage(MonitorPage):
         self._dindex: dict | None = None
         self._quit_timer = 0
         self._aligned = False
+        self._align_id: int | None = None
         self._gen = -1
         self._order: list = []
         self._sec_kids = {SECTION_APPS: [], SECTION_PROCS: []}
@@ -180,8 +158,16 @@ class ProcessesPage(MonitorPage):
             self.details_btn.set_label("Details")
         hide = ({"disk", "vram", "swap"} if level >= 1 else set()) | (
             {"pid", "gpu"} if narrow else set())
+        changed = False
         for key, col in self.cols.items():
-            col.set_visible(key not in hide)
+            want = key not in hide
+            if col.get_visible() != want:
+                col.set_visible(want)
+                changed = True
+        if changed:
+            self._aligned = False
+            if self._shown and self._align_id is None:
+                self._align_id = GLib.idle_add(self._align_headers)
 
     def sort_by(self, key: str) -> None:
         """Sort the table by one column, descending ("Open Processes" on the Memory
@@ -202,8 +188,16 @@ class ProcessesPage(MonitorPage):
         if self._insp is not None and not self._insp.gone and not self._insp_timer:
             self._insp_timer = GLib.timeout_add(INSPECT_MS, self._insp_tick)
 
+    def can_park(self) -> bool:
+        return self._insp is None
+
     def on_hidden(self) -> None:
         """Release everything: the walk stops and the rows are dropped."""
+        align_id = getattr(self, "_align_id", None)
+        if align_id is not None:
+            GLib.source_remove(align_id)
+            self._align_id = None
+        self._aligned = False
         if self._quit_timer:
             GLib.source_remove(self._quit_timer)
             self._quit_timer = 0
@@ -362,8 +356,12 @@ class ProcessesPage(MonitorPage):
         self.sections[SECTION_APPS].name = f"Apps ({n_apps})"
         self.sections[SECTION_PROCS].name = f"Processes ({len(shown)})"
         cpu = sum(p.cpu or 0 for p in shown)
-        set_text(self.summary, (f"{n_apps} apps · {len(shown)} of {len(procs)} processes · "
-                               f"CPU {fmt.pct(cpu, 1)}") if procs else "Reading processes…")
+        set_text(
+            self.summary,
+            (f"{n_apps} app{'s' if n_apps != 1 else ''} · {len(shown)} of "
+             f"{len(procs)} process{'es' if len(procs) != 1 else ''} · CPU {fmt.pct(cpu, 1)}")
+            if procs else "Reading processes…",
+        )
         self._rebuilding = True
         try:
             with self.sel.freeze_notify():
@@ -388,17 +386,21 @@ class ProcessesPage(MonitorPage):
             col = self.cols[key]
             if col.get_title() != want:
                 col.set_title(want)
-        if not self._aligned:
-            self._aligned = True
-            GLib.idle_add(self._align_headers)
+        if not self._aligned and self._align_id is None:
+            self._align_id = GLib.idle_add(self._align_headers)
 
     def _align_headers(self) -> bool:
         """Numeric columns right-align their cells; their header text follows."""
+        self._align_id = None
+        if not self._shown:
+            return GLib.SOURCE_REMOVE
+        found = 0
         stack = [self.cv]
         while stack:
             w = stack.pop()
             if isinstance(w, Gtk.Label) and any(
                     a.__gtype__.name == "GtkColumnViewTitle" for a in _ancestors(w)):
+                found += 1
                 title = w.get_text().split("\n")[0]
                 _attach_header_tooltip(w)
                 if title != "Name":
@@ -409,6 +411,8 @@ class ProcessesPage(MonitorPage):
             while c is not None:
                 stack.append(c)
                 c = c.get_next_sibling()
+        if found:
+            self._aligned = True
         return GLib.SOURCE_REMOVE
 
     def _fill_group(self, r: Row, members, keyf, desc, live) -> int:

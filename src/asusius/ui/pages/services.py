@@ -144,7 +144,7 @@ class ServicesPage(Page):
         det.add_css_class("svc-details")
         top = Gtk.Box(spacing=10)
         self.d_title = label("", ("svc-details-title",), hexpand=True,
-                             ellipsize=Pango.EllipsizeMode.MIDDLE)
+                             ellipsize=Pango.EllipsizeMode.MIDDLE, selectable=True)
         top.append(self.d_title)
         self.d_state = label("", ("svc-state",), xalign=0.5)
         self.d_state.set_valign(Gtk.Align.CENTER)
@@ -281,7 +281,7 @@ class ServicesPage(Page):
         c = counts(units)
         allc = counts(filter_units(self.units, kind=KINDS[self.kind.get_selected()][0]))
         shown = f"{c['total']} shown of {allc['total']}" if c["total"] != allc["total"] \
-            else f"{allc['total']} units"
+            else f"{allc['total']} unit{'s' if allc['total'] != 1 else ''}"
         self.summary.set_label(f"{shown} · {allc['running']} running · {allc['failed']} "
                                f"failed · {self.scope} units")
         if sel_name and sel_name in self.rows:
@@ -335,6 +335,7 @@ class ServicesPage(Page):
     def _show_details(self, u: Unit, fetch: bool) -> None:
         self.details.set_visible(True)
         self.d_title.set_label(u.name)
+        self.d_title.set_tooltip_text(u.name)
         self.d_state.set_label(u.state_text())
         for t in ("ok", "err", "warn", "dim"):
             self.d_state.remove_css_class(t)

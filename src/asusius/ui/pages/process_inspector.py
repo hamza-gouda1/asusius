@@ -27,6 +27,7 @@ def _fit_val(lab: Gtk.Label, key: str) -> Gtk.Label:
     lab.set_ellipsize(Pango.EllipsizeMode.START if key in _VAL_START_ELLIPSIZE
                       else Pango.EllipsizeMode.END)
     lab.set_max_width_chars(VAL_MAX_CHARS)
+    lab.set_selectable(True)
     return lab
 
 _HAS_ADW_DIALOG = hasattr(Adw, "Dialog")
