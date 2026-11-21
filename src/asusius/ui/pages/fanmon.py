@@ -12,7 +12,8 @@ from ..widgets import label
 from .base import button
 from .monitor_base import WINDOW_S, MonitorPage, Panel, StatGrid, note, set_text
 
-rpm_fmt = lambda v: f"{v / 1000:g}k" if v else "0"  # noqa: E731
+def rpm_fmt(v):
+    return f"{v / 1000:g}k" if v else "0"
 
 
 class FanMonitorPage(MonitorPage):
@@ -54,11 +55,11 @@ class FanMonitorPage(MonitorPage):
         self.body.append(self.missing)
         tp = self.panel("Temperatures", suffix=legend([("CPU package", "rose"),
                                                        ("GPU", "gold"), ("NVMe", "slate"),
-                                                       ("memory", "sage")]))
+                                                       ("Memory", "sage")]))
         self.temp_lines = [Line("temp.cpu", "CPU", "rose", fill=False),
                            Line("dgpu.temp", "GPU", "gold", fill=False),
                            Line("temp.disk.nvme0n1.0", "NVMe", "slate", fill=False),
-                           Line("temp.dimm0", "memory", "sage", fill=False)]
+                           Line("temp.dimm0", "Memory", "sage", fill=False)]
         self.temp_chart = self.chart(self.temp_lines, y_fixed=(20, 100),
                                      fmt=lambda v: f"{temp_value(v)}{temp_unit_label()}",
                                      height=170)
@@ -68,6 +69,17 @@ class FanMonitorPage(MonitorPage):
         self._temp_keys: list[str] = []
         tp.append(note("The dGPU temperature is only read while it is awake. The fans are "
                        "set by the firmware from its curve; edit the curves in Fan curves."))
+
+    def save_state(self) -> dict:
+        return {"session_peak": dict(self.session_peak)}
+
+    def restore_state(self, state: dict) -> None:
+        peaks = (state or {}).get("session_peak")
+        if isinstance(peaks, dict):
+            for k in ("cpu", "gpu"):
+                v = peaks.get(k)
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    self.session_peak[k] = max(self.session_peak.get(k, 0.0), float(v))
 
     def refresh_temperature_unit(self) -> None:
         self.temp_chart.queue_draw()
@@ -102,9 +114,13 @@ class FanMonitorPage(MonitorPage):
             t = st.last(temp_key)
             g.set("temp", fmt_temp(t) if t is not None else
                   ("asleep" if temp_key == "dgpu.temp" else "–"))
-        missing = [k for k in ("cpu", "gpu") if k not in fans]
-        set_text(self.missing, ("No sensor for: " + ", ".join(missing) + " fan.")
-                 if missing else "")
+        names = {"cpu": "CPU", "gpu": "GPU"}
+        missing = [names[k] for k in ("cpu", "gpu") if k not in fans]
+        set_text(
+            self.missing,
+            (f"No sensor for: {', '.join(missing)} fan{'s' if len(missing) != 1 else ''}.")
+            if missing else "",
+        )
         self.missing.set_visible(bool(missing))
         keys = self._temps()
         if [k for k, _ in keys] != self._temp_keys:
@@ -119,5 +135,9 @@ class FanMonitorPage(MonitorPage):
             v = st.last(k)
             self.temps.set(k, fmt_temp(v) if v is not None else
                            ("asleep" if k == "dgpu.temp" else "–"))
-        set_text(self.sub, f"{len(fans)} fans · {len(keys)} temperature sensors · hwmon")
+        set_text(
+            self.sub,
+            f"{len(fans)} fan{'s' if len(fans) != 1 else ''} · "
+            f"{len(keys)} temperature sensor{'s' if len(keys) != 1 else ''} · hwmon",
+        )
         self.redraw()

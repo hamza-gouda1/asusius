@@ -418,7 +418,7 @@ def inner(args) -> int:
     gi.require_version("Adw", "1")
     gi.require_version("Gsk", "4.0")
     gi.require_version("Graphene", "1.0")
-    from gi.repository import Adw, GLib, Gsk, Gtk, Graphene
+    from gi.repository import GLib, Gsk, Gtk, Graphene
 
     from asusius.backends.fake import build_fake_tree
     from asusius.controller import FAKE_ROOT_ENV
@@ -487,8 +487,9 @@ def inner(args) -> int:
         renderer = Gsk.CairoRenderer.new()
         renderer.realize_for_display(win.get_display())
         try:
-            renderer.render_texture(snap.to_node(),
-                                    Graphene.Rect().init(0, 0, width, height)).save_to_png(str(path))
+            tex = renderer.render_texture(
+                snap.to_node(), Graphene.Rect().init(0, 0, width, height))
+            tex.save_to_png(str(path))
         finally:
             renderer.unrealize()
         print(f"wrote {path} (popover at {x:.0f},{y:.0f} {pop.get_width()}x{pop.get_height()})")
@@ -499,6 +500,9 @@ def inner(args) -> int:
         hub = win.hub
         hub.hold = True
         hub.stop()
+        ctx = GLib.MainContext.default()
+        while hub._busy:
+            ctx.iteration(True)
         hub.store.clear()
         clock = {"t": time.monotonic() - 125.0}
         hub.procs_wanted = True

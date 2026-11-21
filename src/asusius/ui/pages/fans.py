@@ -78,7 +78,8 @@ class FansPage(Page):
                                        min_children_per_line=2, max_children_per_line=4,
                                        column_spacing=6, row_spacing=4)
         for name in FAN_PRESETS:
-            pb = Gtk.Button(label=name, tooltip_text=f"Load {name} fan curve preset (preview before applying)")
+            pb = Gtk.Button(label=name,
+                            tooltip_text=f"Load {name} fan curve preset (preview before applying)")
             pb.add_css_class("preset-chip")
             pb.connect("clicked", lambda _b, n=name: self._apply_preset(n))
             self.preset_flow.append(pb)
@@ -291,14 +292,24 @@ class FansPage(Page):
                          f"Both fans in the {PROFILE_INFO[prof][0]} profile go back to the "
                          "firmware default curve.", "Restore", go, destructive=True)
 
+    def on_shown(self) -> None:
+        super().on_shown()
+        if hasattr(self.win, "telemetry"):
+            self.on_telemetry(self.win.telemetry())
+
     def on_telemetry(self, t) -> None:
+        cur = getattr(self.win, "current", self.key)
+        if isinstance(cur, str) and cur != self.key:
+            return
         # Never show CPU temperature on the GPU curve while the dGPU is sleeping.
-        self.canvas.live_temp = t.cpu_temp_c if self.fan == "CPU" else t.gpu_temp_c
-        self.canvas.queue_draw()
+        live_temp = t.cpu_temp_c if self.fan == "CPU" else t.gpu_temp_c
+        if live_temp != self.canvas.live_temp:
+            self.canvas.live_temp = live_temp
+            self.canvas.queue_draw()
         for name, rpm in t.fan_rpm.items():
             pill_lbl = self.live_pills.get(name)
             if pill_lbl is None:
-                pill_lbl = label("", ("live-pill", "numeric"))
+                pill_lbl = label("", ("live-pill", "numeric"), width_chars=16, xalign=0.0)
                 self.live_strip.append(pill_lbl)
                 ch = pill_lbl.get_parent()
                 if ch is not None:
@@ -311,4 +322,6 @@ class FansPage(Page):
             elif "GPU" in short:
                 temp_txt = (f" · {fmt_temp(t.gpu_temp_c)}" if t.gpu_temp_c is not None
                             else " · sleeping")
-            pill_lbl.set_label(f"{short}: {fmt_rpm(rpm)} rpm{temp_txt}")
+            txt = f"{short}: {fmt_rpm(rpm)} rpm{temp_txt}"
+            if txt != pill_lbl.get_label():
+                pill_lbl.set_label(txt)

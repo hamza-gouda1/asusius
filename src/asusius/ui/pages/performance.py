@@ -128,7 +128,14 @@ class PerformancePage(Page):
 
         run_bg(load, done=self._show_limits)
 
+    def on_shown(self) -> None:
+        super().on_shown()
+        self._sync_live_chips()
+
     def on_telemetry(self, t) -> None:
+        cur = getattr(self.win, "current", self.key)
+        if isinstance(cur, str) and cur != self.key:
+            return
         self._sync_live_chips(t)
 
     @staticmethod
@@ -141,7 +148,7 @@ class PerformancePage(Page):
         if t is None:
             t = self.win.telemetry()
         try:
-            gov = self.win.hub.sampler.cpu.policy(include_groups=False).get("governor")
+            gov = (self.win.hub.info.get("cpu") or {}).get("governor")
         except Exception:
             gov = None
         temp = f"CPU {fmt_temp(t.cpu_temp_c)}" if t.cpu_temp_c is not None else ""

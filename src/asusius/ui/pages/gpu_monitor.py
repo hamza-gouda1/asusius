@@ -13,7 +13,8 @@ from ..viewmodels import DGPU_LOST_TEXT, fmt_temp, gpu_vendor_title
 from ..widgets import label
 from .monitor_base import MonitorPage, StatGrid, note, set_text
 
-pct = lambda v: f"{v:.0f}%"  # noqa: E731
+def pct(v):
+    return f"{v:.0f}%"
 
 LINK_TIP = "Negotiated PCIe link, current vs maximum (read from sysfs only while awake)"
 
@@ -134,10 +135,10 @@ class IntelGpuPage(MonitorPage):
         ig = self.hub.sampler.igpu
         self.name, self.sub, self.pills = self.header(
             gpu_vendor_title({"name": getattr(ig, "name", "")}, "igpu"), "")
-        p = self.panel("Utilisation", suffix=legend([("render engine busy", "primary"),
+        p = self.panel("Utilisation", suffix=legend([("Render engine busy", "primary"),
                                                      ("GT awake (not in RC6)", "gold")]))
-        p.append(self.chart([Line("igpu.util", "render"),
-                             Line("igpu.awake", "awake", "gold", fill=False, dash=True)],
+        p.append(self.chart([Line("igpu.util", "Render"),
+                             Line("igpu.awake", "Awake", "gold", fill=False, dash=True)],
                             y_fixed=(0, 100), fmt=pct, height=180))
         self.stats = StatGrid(2, 4)
         for key, cap, tip in (("util", "Render busy", None), ("awake", "GT awake", None),
@@ -153,10 +154,10 @@ class IntelGpuPage(MonitorPage):
         p.append(note("Utilisation is summed from the per-client engine time the DRM driver "
                       "(i915 / xe / amdgpu) publishes in /proc/<pid>/fdinfo, for processes this "
                       "app may read (your session). The iGPU shares system memory."))
-        fp = self.panel("Clock", suffix=legend([("actual MHz", "primary"),
-                                                ("requested MHz", "gold")]))
-        fp.append(self.chart([Line("igpu.freq", "actual"),
-                              Line("igpu.freq_req", "requested", "gold", fill=False)],
+        fp = self.panel("Clock", suffix=legend([("Actual MHz", "primary"),
+                                                ("Requested MHz", "gold")]))
+        fp.append(self.chart([Line("igpu.freq", "Actual"),
+                              Line("igpu.freq_req", "Requested", "gold", fill=False)],
                              floor=0, min_span=1600, fmt=lambda v: f"{v:.0f}", height=130))
         ep = self.panel("Engines")
         self.engines = StatGrid(2, 5)
@@ -220,9 +221,9 @@ class NvidiaGpuPage(MonitorPage):
         self.sleep_note = note("", "monitor-callout")
         self.body.append(self.sleep_note)
         p = self.panel("Utilisation", suffix=legend([("GPU", "primary"),
-                                                     ("memory controller", "gold")]))
+                                                     ("Memory controller", "gold")]))
         p.append(self.chart([Line("dgpu.util", "GPU"),
-                             Line("dgpu.mem_util", "memory", "gold", fill=False)],
+                             Line("dgpu.mem_util", "Memory", "gold", fill=False)],
                             y_fixed=(0, 100), fmt=pct, height=170,
                             dense_grid=True, monitor=True))
         self.stats = StatGrid(2, 4)
@@ -251,8 +252,8 @@ class NvidiaGpuPage(MonitorPage):
                                      height=120, dense_grid=True, monitor=True)
         vp.append(self.vram_chart)
         cp = self.panel("Clock, temperature and power")
-        cp.append(legend([("graphics MHz", "primary")]))
-        cp.append(self.chart([Line("dgpu.gr_mhz", "graphics")], floor=0, min_span=3000,
+        cp.append(legend([("Graphics MHz", "primary")]))
+        cp.append(self.chart([Line("dgpu.gr_mhz", "Graphics")], floor=0, min_span=3000,
                              fmt=lambda v: f"{v:.0f}", height=110))
         cp.append(legend([("°C", "rose"), ("W", "gold")]))
         cp.append(self.chart([Line("dgpu.temp", "°C", "rose", fill=False),
@@ -420,8 +421,8 @@ class NvidiaGpuPage(MonitorPage):
             self._clear_video()
             self._video_keys = keys
             series = [(f"dgpu.{key}", title, colour)
-                      for key, title, colour in (("enc", "encode", "primary"),
-                                                 ("dec", "decode", "gold"))
+                      for key, title, colour in (("enc", "Encode", "primary"),
+                                                 ("dec", "Decode", "gold"))
                       if key in keys]
             self._video_chart = self.chart(
                 [Line(key, title, colour, fill=False) for key, title, colour in series],

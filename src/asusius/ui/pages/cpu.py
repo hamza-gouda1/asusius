@@ -89,14 +89,18 @@ class CpuPage(MonitorPage):
         st = s.cpu.static
         self.static = st
         vinfo = cpu_vendor_info(st, {})
-        sub = f"{st['count']} threads · {st['cores']} cores"
+        sub = (f"{st['count']} thread{'s' if st['count'] != 1 else ''} · "
+               f"{st['cores']} core{'s' if st['cores'] != 1 else ''}")
         if st["hybrid"]:
             sub += f" ({st['p_cores']} performance + {st['e_cores']} efficient)"
         self.name, self.sub, self.pills = self.header(st.get("model") or "Processor", sub)
-        pct = lambda v: f"{v:.0f}%"  # noqa: E731
-        p = self.panel("Utilisation", suffix=legend([("user", "primary"), ("system", "gold"),
+
+        def pct(v):
+            return f"{v:.0f}%"
+
+        p = self.panel("Utilisation", suffix=legend([("User", "primary"), ("System", "gold"),
                                                      ("I/O wait", "slate")]))
-        p.append(self.chart([Line("cpu.user", "user"), Line("cpu.system", "system", "gold"),
+        p.append(self.chart([Line("cpu.user", "User"), Line("cpu.system", "System", "gold"),
                              Line("cpu.iowait", "I/O wait", "slate")], stacked=True,
                             y_fixed=(0, 100), fmt=pct, height=190, window_s=WINDOW_S,
                             dense_grid=True, monitor=True))
@@ -125,7 +129,7 @@ class CpuPage(MonitorPage):
         cp.append(self.cache_grid)
         cp.set_visible(bool(cells))
         cores = self.panel("Logical CPUs", suffix=legend(
-            [("performance core", "primary"), ("efficient core", "gold")]
+            [("Performance core", "primary"), ("Efficient core", "gold")]
             if st["hybrid"] else []))
         cores.append(note("Each tile: usage over the last minute, current clock and the "
                           "temperature of its physical core."))
@@ -133,13 +137,13 @@ class CpuPage(MonitorPage):
         self.charts.append(self.grid)
         cores.append(self.grid)
         fp = self.panel("Clock and temperature")
-        fp.append(legend([("average clock (GHz)", "primary")]))
-        fp.append(self.chart([Line("cpu.freq.avg", "avg", scale=1 / 1000)], floor=0,
+        fp.append(legend([("Average clock (GHz)", "primary")]))
+        fp.append(self.chart([Line("cpu.freq.avg", "Avg", scale=1 / 1000)], floor=0,
                              min_span=5, fmt=lambda v: f"{v:g} GHz", height=120,
                              dense_grid=True, monitor=True))
-        self.temp_legend = legend([(f"package {temp_unit_label()}", "rose")])
+        self.temp_legend = legend([(f"Package {temp_unit_label()}", "rose")])
         fp.append(self.temp_legend)
-        self.temp_chart = self.chart([Line("temp.cpu", "pkg", "rose")], y_fixed=(20, 100),
+        self.temp_chart = self.chart([Line("temp.cpu", "Pkg", "rose")], y_fixed=(20, 100),
                                      fmt=lambda v: f"{temp_value(v)}°", height=120,
                                      dense_grid=True, monitor=True)
         fp.append(self.temp_chart)
@@ -164,12 +168,13 @@ class CpuPage(MonitorPage):
         while stack:
             w = stack.pop()
             if isinstance(w, Gtk.Label):
-                w.set_label(f"package {unit}")
+                w.set_label(f"Package {unit}")
             c = w.get_first_child()
             while c is not None:
                 stack.append(c)
                 c = c.get_next_sibling()
         self.temp_chart.queue_draw()
+        self.grid.queue_draw()
         self.stats.set("temp", fmt_temp(self.hub.store.last("temp.cpu")))
 
     def update(self) -> None:

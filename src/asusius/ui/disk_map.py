@@ -251,8 +251,10 @@ class DiskUsageChart(Gtk.DrawingArea):
         self._mode = MODE_TREEMAP
         self._apparent = False
         self._view = None
-        self._sel = None          # hover / keyboard selection (one slot)
-        self._sel_source = None   # "hover" or "kb": pointer leave clears hover only
+        self._hover = None
+        self._kb_sel = None
+        self._sel = None          # active highlight (hover if active else keyboard)
+        self._sel_source = None   # "hover" or "kb": pointer leave restores kb selection
         self._last_size = None    # (w, h) of the last built geometry (hit fallback)
         self._serial = 0          # bumped on every model/view/mode change
         self._geom_key = None
@@ -286,6 +288,8 @@ class DiskUsageChart(Gtk.DrawingArea):
         stats = getattr(result, "stats", None) or {}
         self._apparent = bool(use_apparent) or bool(stats.get("use_apparent"))
         self._view = getattr(result, "root", None) if result is not None else None
+        self._hover = None
+        self._kb_sel = None
         self._sel = None
         self._sel_source = None
         self._serial += 1
@@ -370,6 +374,8 @@ class DiskUsageChart(Gtk.DrawingArea):
     def _set_view(self, view) -> None:
         had = self._sel is not None
         self._view = view
+        self._hover = None
+        self._kb_sel = None
         self._sel = None
         self._sel_source = None
         # a new view invalidates the geometry cache and the stored geometry lists
@@ -387,9 +393,17 @@ class DiskUsageChart(Gtk.DrawingArea):
             self.on_select(self._model, self._sel)
 
     def _set_sel(self, idx, source: str) -> None:
-        if idx != self._sel or self._sel_source != source:
-            self._sel = idx
-            self._sel_source = source
+        if source == "hover":
+            self._hover = idx
+            eff = idx if idx is not None else getattr(self, "_kb_sel", None)
+            eff_src = "hover" if idx is not None else ("kb" if eff is not None else None)
+        else:
+            self._kb_sel = idx
+            eff = idx
+            eff_src = "kb" if idx is not None else None
+        if eff != self._sel or self._sel_source != eff_src:
+            self._sel = eff
+            self._sel_source = eff_src
             self._emit_select()
         self.queue_draw()
 
@@ -410,7 +424,7 @@ class DiskUsageChart(Gtk.DrawingArea):
                 lines[1] = f"{lines[1]} · {share:.0f} % of {pnode.name}"
         count = self._count_of(result, idx)
         if count is not None:
-            lines.append(f"{fmt.count(count)} items")
+            lines.append(f"{fmt.count(count)} item{'s' if count != 1 else ''}")
         elif not self._is_dir(result, idx):
             lines.append("file")
         return "\n".join(lines)
@@ -573,11 +587,12 @@ class DiskUsageChart(Gtk.DrawingArea):
                 self.set_tooltip_text(None)
 
     def _leave(self, _c) -> None:
-        if self._sel_source == "hover":
+        if getattr(self, "_hover", None) is not None or self._sel_source == "hover":
             self._set_sel(None, "hover")
             self.set_tooltip_text(None)
 
     def _click(self, gc, _n, x, y) -> None:
+        self.grab_focus()
         btn = gc.get_current_button()
         kind, idx = self._hit(x, y)
         if btn == 3:
@@ -605,8 +620,9 @@ class DiskUsageChart(Gtk.DrawingArea):
         pos = self._sibling_order(result, self._view)
         if not pos:
             return False
+        kb = getattr(self, "_kb_sel", None)
         try:
-            at = pos.index(self._sel)
+            at = pos.index(kb)
         except ValueError:
             at = -1
         if key in ("Right", "Down"):
@@ -627,7 +643,7 @@ class DiskUsageChart(Gtk.DrawingArea):
         if key == "BackSpace":
             return self.up()
         if key == "Escape":
-            if self._sel is not None:
+            if kb is not None or self._sel is not None:
                 self._set_sel(None, "kb")
             return True
         return False

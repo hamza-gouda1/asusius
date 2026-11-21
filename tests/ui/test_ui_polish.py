@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) Hamza Gouda
-"""Headless verification of UI preferences, vendor/preset viewmodels, CSS polish and callback safety."""
+"""Headless checks for UI preferences, vendor/preset viewmodels, CSS polish, and callbacks."""
 from __future__ import annotations
 
 import os
@@ -13,13 +13,21 @@ from unittest.mock import Mock, patch
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk  # noqa: E402
+from gi.repository import Gdk, Gtk  # noqa: E402
 
 from asusius.backends.fake import DEFAULT_CURVES  # noqa: E402
 from asusius.core import Capability, FanCurve, GpuMode, Telemetry  # noqa: E402
+from asusius.telemetry.ring import Store  # noqa: E402
 from asusius.ui import app as ui_app  # noqa: E402
+from asusius.ui import chartmath as ui_chartmath  # noqa: E402
+from asusius.ui import charts as ui_charts  # noqa: E402
+from asusius.ui import disk_map as ui_disk_map  # noqa: E402
+from asusius.ui import history_chart as ui_history_chart  # noqa: E402
+from asusius.ui import live as ui_live  # noqa: E402
 from asusius.ui import prefs  # noqa: E402
 from asusius.ui import viewmodels as vm  # noqa: E402
+from asusius.ui.pages.memory import MemoryPage  # noqa: E402
+from asusius.ui.window import MainWindow  # noqa: E402
 from asusius.ui.pages.agent_access import AgentAccessPage  # noqa: E402
 from asusius.ui.pages.automation import AutomationPage  # noqa: E402
 from asusius.ui.pages.battery import BatteryPage  # noqa: E402
@@ -378,7 +386,9 @@ class PageCallbackSafetyTests(unittest.TestCase):
                 captions={k: Mock() for k in keys},
                 boxes={k: Mock() for k in keys},
             )
-            g.set = lambda key, text, tip=None: StatGrid.set(g, key, text, tip)
+            def _grid_set(key, text, tip=None):
+                StatGrid.set(g, key, text, tip)
+            g.set = _grid_set
             return g
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -457,6 +467,224 @@ class PageCallbackSafetyTests(unittest.TestCase):
                         page.rapl_note.set_visible.assert_called_with(True)
                     else:
                         page.rapl_note.set_visible.assert_called_with(False)
+
+    def test_core_grid_renders_fahrenheit_when_selected(self):
+        import cairo
+        store = SimpleNamespace(
+            last_t=10.0,
+            series={},
+            last=lambda k: {"cpu.0": 42.0, "cpu.freq.0": 3500.0, "temp.core.0": 100.0}.get(k),
+            index_range=lambda _t: range(0),
+        )
+        grid = SimpleNamespace(
+            hub=SimpleNamespace(store=store, interval_s=1.0),
+            cpus=[0],
+            topo={0: {"kind": "P", "thread": 0, "core_id": 0}},
+            window_s=60.0,
+            _cols=1,
+            CELL_H=74,
+            GAP=8,
+            _xs=[],
+            _ys=[],
+        )
+        drawn = []
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 200, 100)
+        cr = cairo.Context(surf)
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.dict(os.environ, {"XDG_CONFIG_HOME": tmp}):
+                prefs.save_prefs(temp_unit="F")
+                with patch.object(ui_charts, "_text",
+                                  side_effect=lambda _c, _l, txt, *_a: drawn.append(txt)):
+                    ui_charts.CoreGrid._draw(grid, None, cr, 200, 100)
+        self.assertIn("3.50 GHz · 212°", drawn)
+
+    def test_window_refresh_temperature_unit_calls_page_hook_and_cpu_redraws_grid(self):
+        hook_page = SimpleNamespace(is_monitor_page=True, refresh_temperature_unit=Mock(),
+                                    update=Mock())
+        win = SimpleNamespace(
+            current="cpu",
+            pages=SimpleNamespace(get_built=lambda _k: hook_page),
+            telemetry=Mock(return_value="t"),
+            on_telemetry=Mock(),
+        )
+        MainWindow.refresh_temperature_unit(win)
+        hook_page.refresh_temperature_unit.assert_called_once_with()
+        hook_page.update.assert_not_called()
+
+        cpu_page = SimpleNamespace(
+            temp_legend=SimpleNamespace(get_first_child=lambda: None),
+            temp_chart=Mock(),
+            grid=Mock(),
+            stats=Mock(),
+            hub=SimpleNamespace(store=SimpleNamespace(last=lambda _k: 50.0)),
+        )
+        CpuPage.refresh_temperature_unit(cpu_page)
+        cpu_page.temp_chart.queue_draw.assert_called_once_with()
+        cpu_page.grid.queue_draw.assert_called_once_with()
+
+
+class Batch3AuditRegressionTests(unittest.TestCase):
+    def test_window_points_clears_stale_outputs_on_empty_span(self):
+        xs, ys = [1.0, 2.0], [3.0, 4.0]
+        n = ui_chartmath.window_points([1.0], [1.0], range(1), lambda k: k,
+                                       10.0, 10.0, 100.0, xs, ys)
+        self.assertEqual((n, xs, ys), (0, [], []))
+
+    def test_chart_set_window_resets_seen_and_hover_clamps_left_edge(self):
+        import cairo
+        chart = SimpleNamespace(window_s=120.0, _seen=(0.0, 50.0), queue_draw=Mock())
+        ui_charts.Chart.set_window(chart, 300.0)
+        self.assertEqual(chart.window_s, 300.0)
+        self.assertIsNone(chart._seen)
+        chart.queue_draw.assert_called_once_with()
+
+        store = Store(10)
+        store.push(0.0, {"k": 1.0})
+        drawn_rects = []
+        hover = SimpleNamespace(hover_x=10.0, window_s=60.0, lines=[ui_charts.Line("k", "Val")],
+                                fmt=lambda v: f"{v:.0f}")
+        surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, 40, 80)
+        cr = cairo.Context(surf)
+        layout = ui_charts.make_layout(cr)
+        with patch.object(ui_charts, "_round_rect",
+                          side_effect=lambda _cr, bx, by, bw, bh, _r:
+                              drawn_rects.append((bx, bw))):
+            ui_charts.Chart._draw_hover(hover, cr, layout, store, 10.0, 10.0, 20.0, 60.0,
+                                        40.0, 0.0, lambda _v: 40.0, ui_charts.theme.colours(), 1.0)
+        self.assertTrue(drawn_rects)
+        self.assertEqual(drawn_rects[0][0], 2.0)
+
+    def test_memory_escape_returns_false_when_idle_and_true_when_clearing_pin(self):
+        page = SimpleNamespace(pin_ts=None, hover_ts=None, _refresh_readout=Mock())
+        self.assertFalse(MemoryPage._ram_key(page, None, Gdk.KEY_Escape, 0, 0))
+        page.pin_ts = 5.0
+        self.assertTrue(MemoryPage._ram_key(page, None, Gdk.KEY_Escape, 0, 0))
+        self.assertIsNone(page.pin_ts)
+        page._refresh_readout.assert_called_once_with()
+
+    def test_disk_map_hover_preserves_keyboard_selection(self):
+        d = SimpleNamespace(_hover=None, _kb_sel=None, _sel=None, _sel_source=None,
+                            queue_draw=Mock(), _emit_select=Mock(),
+                            _model=SimpleNamespace(), _view=0,
+                            _sibling_order=lambda _m, _v: [1, 2, 3],
+                            drill=Mock(), up=Mock(), set_tooltip_text=Mock())
+        def _set_sel(idx, src):
+            ui_disk_map.DiskUsageChart._set_sel(d, idx, src)
+
+        d._set_sel = _set_sel
+        d._set_sel(2, "kb")
+        self.assertEqual((d._kb_sel, d._sel), (2, 2))
+        d._set_sel(1, "hover")
+        self.assertEqual((d._kb_sel, d._sel), (2, 1))
+        ui_disk_map.DiskUsageChart._leave(d, None)
+        self.assertEqual((d._kb_sel, d._sel), (2, 2))
+        self.assertTrue(ui_disk_map.DiskUsageChart._key(d, None, Gdk.KEY_Return, 0, 0))
+        d.drill.assert_called_once_with(2)
+
+    def test_live_hub_collect_now_busy_guard_and_error_dedup(self):
+        hub = SimpleNamespace(_closed=False, _busy=True)
+        with self.assertRaises(RuntimeError):
+            ui_live.LiveHub.collect_now(hub, 1.0)
+        err_hub = SimpleNamespace(_busy=True, _closed=False, last_error=None, _error_count=0)
+        fut = Mock()
+        fut.exception.return_value = RuntimeError("boom")
+        import io
+        buf = io.StringIO()
+        with patch("sys.stderr", buf):
+            ui_live.LiveHub._deliver(err_hub, fut)
+            ui_live.LiveHub._deliver(err_hub, fut)
+        self.assertEqual(buf.getvalue().count("boom"), 1)
+        self.assertEqual(err_hub._error_count, 2)
+
+    def test_window_park_state_dynamic_gpu_title_and_singular_updates_badge(self):
+        protected = SimpleNamespace(can_park=lambda: False, save_state=Mock())
+        restorable = SimpleNamespace(can_park=lambda: True,
+                                     save_state=lambda: {"view": "usage"})
+        win = SimpleNamespace(
+            current="dashboard",
+            _park_ids={},
+            _parked_state={},
+            responders=[],
+            stack=Mock(),
+            _schedule_trim=Mock(),
+            pages=SimpleNamespace(built={"processes": protected, "memory": restorable},
+                                  get_built=lambda k: {"processes": protected,
+                                                       "memory": restorable}.get(k)),
+        )
+        MainWindow._park(win, "processes")
+        self.assertNotIn("processes", win._parked_state)
+        win.stack.remove.assert_not_called()
+
+        win.pages.built = {"processes": protected, "memory": restorable}
+        MainWindow._park(win, "memory")
+        self.assertEqual(win._parked_state["memory"], {"view": "usage"})
+        win.stack.remove.assert_called_once_with(restorable)
+
+        badge = Mock()
+        uwin = SimpleNamespace(updates_badge=badge)
+        MainWindow.set_updates_count(uwin, 1)
+        badge.set_tooltip_text.assert_called_with("1 update available")
+        MainWindow.set_updates_count(uwin, 3)
+        badge.set_tooltip_text.assert_called_with("3 updates available")
+
+        gwin = SimpleNamespace(
+            current="dgpu",
+            _hw_sig=None,
+            _row_titles={"igpu": Mock(get_label=lambda: "Intel"),
+                         "dgpu": Mock(get_label=lambda: "AMD graphics")},
+            rows={"igpu": Mock(), "dgpu": Mock()},
+            title=Mock(),
+            content_page=Mock(),
+        )
+        MainWindow._sync_sidebar_hardware(gwin, {"igpu": {"driver": "i915"},
+                                                 "dgpu": {"driver": "amdgpu"}})
+        gwin.title.set_title.assert_called_with("AMD graphics")
+        gwin.content_page.set_title.assert_called_with("AMD graphics")
+
+
+class Batch3WidgetTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        if Gdk.Display.get_default() is None:
+            raise unittest.SkipTest("GTK widget tests require a display")
+
+    def test_memory_page_save_and_restore_state(self):
+        hub = SimpleNamespace(store=Store(10), interval_s=1.0, sampler=SimpleNamespace(), info={})
+        w = SimpleNamespace(hub=hub, ctl=None, caps=None, caps_error=None, fake=True)
+        p1 = MemoryPage(w)
+        p1.view_btns["usage"].set_active(True)
+        p1.range_btns[300].set_active(True)
+        p1.comp_toggle.set_active(True)
+        p1.det_toggle.set_active(True)
+        saved = p1.save_state()
+
+        p2 = MemoryPage(w)
+        p2.restore_state(saved)
+        self.assertEqual(p2.view, "usage")
+        self.assertEqual(p2.range_s, 300)
+        self.assertTrue(p2.comp_toggle.get_active())
+        self.assertTrue(p2.det_toggle.get_active())
+
+    def test_history_chart_keyboard_navigation_and_tooltip(self):
+        hc = ui_history_chart.HistoryChart()
+        self.assertFalse(hc.get_focusable())
+        hc.set_data(1000.0, 600.0,
+                    {"percent": [(800.0, 50.0), (900.0, 55.0), (1000.0, 60.0)]}, [])
+        self.assertTrue(hc.get_focusable())
+        self.assertTrue(hc._on_key(None, Gdk.KEY_Home, 0, 0))
+        self.assertEqual(hc._kb_t, 800.0)
+        self.assertTrue(hc._on_key(None, Gdk.KEY_Right, 0, 0))
+        self.assertEqual(hc._kb_t, 900.0)
+        self.assertTrue(hc._on_key(None, Gdk.KEY_End, 0, 0))
+        self.assertEqual(hc._kb_t, 1000.0)
+        tip = Mock()
+        self.assertTrue(hc._query_tooltip(hc, 0, 0, True, tip))
+        self.assertIn("Charge · 60%", tip.set_text.call_args.args[0])
+        self.assertTrue(hc._on_key(None, Gdk.KEY_Escape, 0, 0))
+        self.assertIsNone(hc._kb_t)
+        self.assertFalse(hc._on_key(None, Gdk.KEY_Escape, 0, 0))
+        hc.set_empty_text("None")
+        self.assertFalse(hc.get_focusable())
 
 
 if __name__ == "__main__":

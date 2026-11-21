@@ -23,6 +23,7 @@ from ...telemetry.disk_analyzer import HOG_MIN_BYTES, ScanResult, scan_path
 from ..charts import Line, Meter, legend
 from ..disk_map import MODE_RINGS, MODE_TREEMAP, DiskUsageChart
 from ..tasks import run_bg
+from ..viewmodels import fmt_temp
 from ..widgets import label
 from .base import a11y_name
 from .monitor_base import MonitorPage, Panel, StatGrid, note, set_text
@@ -55,9 +56,12 @@ class StoragePage(MonitorPage):
     def __init__(self, win) -> None:
         super().__init__(win)
         self.name, self.sub, _ = self.header("Storage", "")
-        self.disks: dict[str, tuple] = {}       # disk name -> (panel, StatGrid)
+        self.disks: dict[str, tuple] = {}       # disk name -> (panel, StatGrid, charts)
         self._hw: dict[str, dict] = {}          # disk name -> pill value labels
         self._meta: dict[str, dict] = {}        # last per-drive metadata (fit_width)
+        self._rate_read = fmt.sticky_rate()
+        self._rate_write = fmt.sticky_rate()
+        self._disk_rates: dict[str, tuple[fmt.StickyUnit, fmt.StickyUnit]] = {}
         self.disk_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         self.body.append(self.disk_box)
         self._fs_key = None
@@ -84,6 +88,8 @@ class StoragePage(MonitorPage):
         self._build_analyzer()
         self.fs = self.panel("File systems", suffix=self._scan_folder_button())
         self.fs_rows = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        self._fs_widgets: dict[str, dict] = {}
+        self._fs_empty: Gtk.Widget | None = None
         self.fs.append(self.fs_rows)
         self.body.append(note("Rates come from /proc/diskstats (512-byte sectors) over the "
                               "sampling interval; busy is the share of time the device had "
@@ -245,7 +251,6 @@ class StoragePage(MonitorPage):
         return os.path.expanduser("~")
 
     def _scan_folder_button(self) -> Gtk.Button:
-
         b = Gtk.Button(label="Scan folder…")
         b.set_tooltip_text("Choose a folder and analyze it")
         b.add_css_class("flat")
@@ -381,7 +386,10 @@ class StoragePage(MonitorPage):
         if self._destroyed or not self._visible or not self._scanning:
             return GLib.SOURCE_REMOVE
         dirs, byts = progress or (0, 0)
-        set_text(self.prog_lab, f"Scanning… {fmt.count(dirs)} dirs · {fmt.bytes_(byts)}")
+        set_text(
+            self.prog_lab,
+            f"Scanning… {fmt.count(dirs)} dir{'s' if dirs != 1 else ''} · {fmt.bytes_(byts)}",
+        )
         return GLib.SOURCE_REMOVE
 
     # -- analyzer refresh --------------------------------------------------------------
@@ -701,6 +709,9 @@ class StoragePage(MonitorPage):
         self.hub.sampler.disk.want_mounts = True
         super().on_shown()
 
+    def can_park(self) -> bool:
+        return self._result is None and not self._scanning
+
     def on_hidden(self) -> None:
         self._visible = False
         self.hub.sampler.disk.want_mounts = False
@@ -744,7 +755,7 @@ class StoragePage(MonitorPage):
         self.mid.set_homogeneous(not stacked)
         self.dmap.set_content_height(SCAN_HEIGHT_NARROW if narrow else SCAN_HEIGHT_WIDE)
         self.list_wrap.set_size_request(LIST_WIDE_MIN_W if not stacked else -1, -1)
-        for _n, (_p, g) in self.disks.items():
+        for _n, (_p, g, _charts) in self.disks.items():
             g.set_min_children_per_line(2)
             g.set_max_children_per_line(2 if narrow else 4)
         for pills in self._hw.values():
@@ -754,10 +765,10 @@ class StoragePage(MonitorPage):
         self._apply_row_levels()
         # meta cells: re-show serial/wwn/scheduler per last metadata + level
         for name, meta in self._meta.items():
-            g = self.disks.get(name)
-            if g is None:
+            entry = self.disks.get(name)
+            if entry is None:
                 continue
-            _p, g = g
+            _p, g, _charts = entry
             g.show("wwn", meta.get("wwn") is not None and self._level < 2)
             for k in ("serial", "scheduler"):
                 g.show(k, meta.get(k) is not None)
@@ -765,13 +776,15 @@ class StoragePage(MonitorPage):
     # -- drive panels ---------------------------------------------------------------------
     def _disk_panel(self, name: str, meta: dict) -> tuple:
         title = f"{name} · {meta.get('model') or meta.get('kind')}"
-        p = Panel(title, legend([("read", "primary"), ("write", "gold")]))
-        p.append(self.chart([Line(f"disk.{name}.read", "read"),
-                             Line(f"disk.{name}.write", "write", "gold", fill=False)],
-                            floor=0, min_span=1e7, fmt=fmt.axis_rate, height=150))
-        p.append(legend([("busy %", "slate")]))
-        p.append(self.chart([Line(f"disk.{name}.busy", "busy", "slate")], y_fixed=(0, 100),
-                            fmt=lambda v: f"{v:.0f}%", height=80))
+        p = Panel(title, legend([("Read", "primary"), ("Write", "gold")]))
+        rate_chart = self.chart([Line(f"disk.{name}.read", "Read"),
+                                 Line(f"disk.{name}.write", "Write", "gold", fill=False)],
+                                floor=0, min_span=1e7, fmt=fmt.axis_rate, height=150)
+        p.append(rate_chart)
+        p.append(legend([("Busy %", "slate")]))
+        busy_chart = self.chart([Line(f"disk.{name}.busy", "Busy", "slate")],
+                                y_fixed=(0, 100), fmt=lambda v: f"{v:.0f}%", height=80)
+        p.append(busy_chart)
         g = StatGrid(2, 4)
         for key, cap in _DRIVE_CELLS:
             g.add(key, cap)
@@ -796,24 +809,38 @@ class StoragePage(MonitorPage):
         p.append(pills)
         self._hw[name] = hw
         self.disk_box.append(p)
-        return p, g
+        return p, g, (rate_chart, busy_chart)
 
     # -- telemetry ------------------------------------------------------------------------
+    def refresh_temperature_unit(self) -> None:
+        self.update()
+
     def update(self) -> None:
         st = self.hub.store
         d = self.hub.info.get("disk") or {}
         disks = d.get("disks") or {}
         sens = self.hub.info.get("sensors") or {}
+        for gone in [k for k in self.disks if k not in disks]:
+            p, _g, charts = self.disks.pop(gone)
+            self.disk_box.remove(p)
+            for c in charts:
+                if c in self.charts:
+                    self.charts.remove(c)
+            self._hw.pop(gone, None)
+            self._meta.pop(gone, None)
+            self._disk_rates.pop(gone, None)
         for name, meta in disks.items():
             if name not in self.disks:
                 self.disks[name] = self._disk_panel(name, meta)
-            _p, g = self.disks[name]
-            g.set("read", fmt.rate(st.last(f"disk.{name}.read")))
-            g.set("write", fmt.rate(st.last(f"disk.{name}.write")))
+            _p, g, _charts = self.disks[name]
+            r_fmt, w_fmt = self._disk_rates.setdefault(
+                name, (fmt.sticky_rate(), fmt.sticky_rate()))
+            g.set("read", r_fmt(st.last(f"disk.{name}.read")))
+            g.set("write", w_fmt(st.last(f"disk.{name}.write")))
             g.set("busy", fmt.pct(st.last(f"disk.{name}.busy"), 1))
             labels = (sens.get("nvme") or {}).get(name) or []
             temps = [st.last(f"temp.disk.{name}.{i}") for i in range(len(labels))]
-            g.set("temp", " · ".join(fmt.temp(t) for t in temps if t is not None) or
+            g.set("temp", " · ".join(fmt_temp(t) for t in temps if t is not None) or
                   "no sensor", tooltip=" · ".join(labels) or None)
             g.set("size", fmt.bytes_(meta.get("size")))
             g.set("kind", meta.get("kind") or "–")
@@ -833,12 +860,12 @@ class StoragePage(MonitorPage):
             if hw is not None:
                 set_text(hw["type"], meta.get("kind") or "–")
                 set_text(hw["model"], meta.get("model") or "–")
-                set_text(hw["temp"], " · ".join(fmt.temp(t) for t in temps
+                set_text(hw["temp"], " · ".join(fmt_temp(t) for t in temps
                                                 if t is not None) or "–")
             self._meta[name] = dict(meta)
         set_text(self.sub, f"{len(disks)} physical disk{'s' if len(disks) != 1 else ''} · "
-                 f"read {fmt.rate(st.last('disk.read'))} · write "
-                 f"{fmt.rate(st.last('disk.write'))}")
+                 f"read {self._rate_read(st.last('disk.read'))} · write "
+                 f"{self._rate_write(st.last('disk.write'))}")
         mounts = d.get("mounts")
         if mounts is not None:
             key = tuple((m["mount"], m["used"] >> 20) for m in mounts)
@@ -848,37 +875,58 @@ class StoragePage(MonitorPage):
         self.redraw()
 
     def _fill_fs(self, mounts: list[dict]) -> None:
-        child = self.fs_rows.get_first_child()
-        while child:
-            nxt = child.get_next_sibling()
-            self.fs_rows.remove(child)
-            child = nxt
         if not mounts:
-            self.fs_rows.append(note("No block-device file systems mounted."))
+            for slot in list(self._fs_widgets.values()):
+                self.fs_rows.remove(slot["row"])
+            self._fs_widgets.clear()
+            if self._fs_empty is None:
+                self._fs_empty = note("No block-device file systems mounted.")
+            if self._fs_empty.get_parent() is not self.fs_rows:
+                self.fs_rows.append(self._fs_empty)
             return
+        if self._fs_empty is not None and self._fs_empty.get_parent() is self.fs_rows:
+            self.fs_rows.remove(self._fs_empty)
+        active = {m["mount"] for m in mounts}
+        for gone in [k for k in self._fs_widgets if k not in active]:
+            slot = self._fs_widgets.pop(gone)
+            self.fs_rows.remove(slot["row"])
+        wrap = {"wrap": True, "wrap_mode": Pango.WrapMode.WORD_CHAR}
+        prev = None
         for m in mounts:
-            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-            wrap = {"wrap": True, "wrap_mode": Pango.WrapMode.WORD_CHAR}
-            top = Gtk.Box(spacing=10)
-            top.append(label(m["mount"], ("fs-mount",), hexpand=True, **wrap))
+            mount = m["mount"]
             frac = m["used"] / m["size"] if m["size"] else 0
-            top.append(label(f"{fmt.bytes_(m['used'])} of {fmt.bytes_(m['size'])} · "
-                             f"{fmt.bytes_(m['avail'])} free", ("numeric", "stat-sub"),
-                             xalign=1.0, **wrap))
-            analyze = Gtk.Button(icon_name="system-search-symbolic")
-            a11y_name(analyze, f"Analyze space on {m['mount']}")
-            analyze.set_tooltip_text(f"Analyze space on {m['mount']}")
-            analyze.set_valign(Gtk.Align.CENTER)
-            analyze.connect("clicked", lambda _b, path=m["mount"]: self._start_scan(path))
-            top.append(analyze)
-            row.append(top)
-            row.append(label(f"{m['fstype']} · {m['source']}", ("dim-label", "stat-sub"),
-                             **wrap))
-            meter = Meter(height=8)
-            meter.set_hexpand(True)
-            meter.set_value(frac, "rose" if frac > 0.9 else "primary")
-            row.append(meter)
-            self.fs_rows.append(row)
+            usage_txt = (f"{fmt.bytes_(m['used'])} of {fmt.bytes_(m['size'])} · "
+                         f"{fmt.bytes_(m['avail'])} free")
+            meta_txt = f"{m['fstype']} · {m['source']}"
+            slot = self._fs_widgets.get(mount)
+            if slot is None:
+                row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+                top = Gtk.Box(spacing=10)
+                top.append(label(mount, ("fs-mount",), hexpand=True, **wrap))
+                usage_lbl = label(usage_txt, ("numeric", "stat-sub"), xalign=1.0, **wrap)
+                top.append(usage_lbl)
+                analyze = Gtk.Button(icon_name="system-search-symbolic")
+                a11y_name(analyze, f"Analyze space on {mount}")
+                analyze.set_tooltip_text(f"Analyze space on {mount}")
+                analyze.set_valign(Gtk.Align.CENTER)
+                analyze.connect("clicked", lambda _b, path=mount: self._start_scan(path))
+                top.append(analyze)
+                row.append(top)
+                meta_lbl = label(meta_txt, ("dim-label", "stat-sub"), **wrap)
+                row.append(meta_lbl)
+                meter = Meter(height=8)
+                meter.set_hexpand(True)
+                meter.set_value(frac, "rose" if frac > 0.9 else "primary")
+                row.append(meter)
+                self.fs_rows.append(row)
+                slot = {"row": row, "usage": usage_lbl, "meta": meta_lbl, "meter": meter}
+                self._fs_widgets[mount] = slot
+            else:
+                set_text(slot["usage"], usage_txt)
+                set_text(slot["meta"], meta_txt)
+                slot["meter"].set_value(frac, "rose" if frac > 0.9 else "primary")
+            self.fs_rows.reorder_child_after(slot["row"], prev)
+            prev = slot["row"]
 
 
 def _clear(box: Gtk.Box) -> None:

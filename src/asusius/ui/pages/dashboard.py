@@ -68,7 +68,7 @@ class MetricCard(Gtk.Box):
         self.foot.set_margin_top(4)
         self.append(self.foot)
 
-    def mini(self, caption: str) -> Gtk.Label:
+    def mini(self, caption: str, tooltip: str | None = None) -> Gtk.Label:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         val = label("–", ("mini-value", "numeric"), xalign=1.0)
         box.append(val)
@@ -77,7 +77,7 @@ class MetricCard(Gtk.Box):
         # otherwise push the card past the 360 px window
         cap.set_max_width_chars(12)
         cap.set_ellipsize(Pango.EllipsizeMode.END)
-        cap.set_tooltip_text(caption)
+        cap.set_tooltip_text(tooltip or caption)
         box.append(cap)
         self.cap_labels = getattr(self, "cap_labels", {})
         self.cap_labels[caption] = cap
@@ -87,6 +87,11 @@ class MetricCard(Gtk.Box):
     def set_value(self, value: str, unit: str = "") -> None:
         set_text(self.value, value)
         set_text(self.unit, unit)
+        self.unit.set_visible(bool(unit))
+        if value in ("Unavailable", "Sleeping", "Asleep", "Lost"):
+            self.value.add_css_class("stat-status")
+        else:
+            self.value.remove_css_class("stat-status")
 
     def set_badge(self, text: str | None, css: str = "") -> None:
         self.badge.set_visible(bool(text))
@@ -108,7 +113,7 @@ class DashboardPage(MonitorPage):
 
     def __init__(self, win) -> None:
         super().__init__(win)
-        self.gpu_mode = self.threshold = self.health = None
+        self.gpu_mode = self.threshold = None
         self._svc_status = None
         self._setup_spec = None
         self._toggling_bat = False
@@ -150,40 +155,40 @@ class DashboardPage(MonitorPage):
         rate = dict(floor=0, min_span=1e6, fmt=fmt.axis_rate)
         C = MetricCard
         self.cpu = C(self, "cpu", "Processor", "computer-symbolic", [Line("cpu.total")], **pct)
-        self.cpu_temp = self.cpu.mini("pkg")
-        self.cpu_freq = self.cpu.mini("GHz avg")
+        self.cpu_temp = self.cpu.mini("pkg", "CPU package temperature")
+        self.cpu_freq = self.cpu.mini("GHz avg", "CPU average frequency")
         self.mem = C(self, "memory", "Memory", "media-flash-symbolic",
                      [Line("mem.in_use", scale=1 / GIB)], floor=0, min_span=16,
                      fmt=lambda v: f"{v:g} G")
-        self.mem_swap = self.mem.mini("GiB swap")
-        self.mem_avail = self.mem.mini("GiB avail")
+        self.mem_swap = self.mem.mini("GiB swap", "Swap used")
+        self.mem_avail = self.mem.mini("GiB avail", "Available memory")
         self.igpu = C(self, "igpu", "Intel graphics", "video-display-symbolic",
                       [Line("igpu.util")], **pct)
-        self.igpu_freq = self.igpu.mini("MHz")
-        self.igpu_awake = self.igpu.mini("% awake")
+        self.igpu_freq = self.igpu.mini("MHz", "GPU frequency")
+        self.igpu_awake = self.igpu.mini("% awake", "GPU awake share")
         self.dgpu = C(self, "dgpu", "NVIDIA graphics", "applications-graphics-symbolic",
                       [Line("dgpu.util")], **pct)
-        self.dgpu_temp = self.dgpu.mini("gpu_t")
-        self.dgpu_power = self.dgpu.mini("W")
+        self.dgpu_temp = self.dgpu.mini("gpu_t", "GPU temperature")
+        self.dgpu_power = self.dgpu.mini("W", "GPU power draw")
         self.fan_cpu = C(self, "fanmon", "CPU fan", "weather-windy-symbolic",
                          [Line("fan.cpu")], **rpm)
-        self.fan_cpu_t = self.fan_cpu.mini("cpu_t")
+        self.fan_cpu_t = self.fan_cpu.mini("cpu_t", "CPU temperature")
         self.fan_gpu = C(self, "fanmon", "GPU fan", "weather-windy-symbolic",
                          [Line("fan.gpu", color="gold")], **rpm)
-        self.fan_gpu_t = self.fan_gpu.mini("gpu_fan_t")
+        self.fan_gpu_t = self.fan_gpu.mini("gpu_fan_t", "GPU temperature")
         self.disk = C(self, "storage", "Storage", "drive-harddisk-solidstate-symbolic",
                       [Line("disk.read", "read"),
                        Line("disk.write", "write", color="gold", fill=False)], **rate)
-        self.disk_w = self.disk.mini("write")
-        self.disk_t = self.disk.mini("disk_t")
+        self.disk_w = self.disk.mini("write", "Disk write rate")
+        self.disk_t = self.disk.mini("disk_t", "Disk temperature")
         self.net = C(self, "network", "Network", "network-transmit-receive-symbolic",
                      [Line("net.rx", "down"), Line("net.tx", "up", color="gold", fill=False)],
                      **rate)
-        self.net_tx = self.net.mini("up")
+        self.net_tx = self.net.mini("up", "Network upload rate")
         self.bat = C(self, "battery", "Battery", "battery-level-80-symbolic",
                      [Line("bat.power")], floor=0, min_span=60, fmt=lambda v: f"{v:g} W")
-        self.bat_pct = self.bat.mini("% charge")
-        self.bat_health = self.bat.mini("% health")
+        self.bat_pct = self.bat.mini("% charge", "Battery charge")
+        self.bat_health = self.bat.mini("% health", "Battery health")
         self._sync_temp_labels()
 
         flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
@@ -212,7 +217,6 @@ class DashboardPage(MonitorPage):
             lbl = getattr(card, "cap_labels", {}).get(key)
             if lbl is not None:
                 set_text(lbl, text)
-                lbl.set_tooltip_text(text)
 
     def refresh(self) -> None:
         def summary():
@@ -320,6 +324,42 @@ class DashboardPage(MonitorPage):
         self.win.run_write(lambda: self.ctl.set_battery_threshold(target),
                            f"Charge limit set to {target}%", after=done, on_error=err)
 
+    def _make_pill(self, icon_name: str, css: tuple[str, ...], tooltip: str,
+                   on_click, label_css: tuple[str, ...] = ()) -> tuple:
+        b = Gtk.Button(tooltip_text=tooltip)
+        b.add_css_class("quick-pill")
+        for c in css:
+            b.add_css_class(c)
+        box = Gtk.Box(spacing=6)
+        img = Gtk.Image.new_from_icon_name(icon_name)
+        lbl = label("", label_css)
+        box.append(img)
+        box.append(lbl)
+        b.set_child(box)
+        b.connect("clicked", lambda *_: on_click())
+        self._append_pill(b)
+        return b, img, lbl
+
+    def _ensure_pills(self) -> None:
+        if getattr(self, "_pill_widgets", None) is not None:
+            return
+        self._pill_widgets = {
+            "prof": self._make_pill(
+                "power-profile-balanced-symbolic", ("accent",),
+                "Power profile — click to cycle mode", self._cycle_profile),
+            "gpu": self._make_pill(
+                "applications-graphics-symbolic", (),
+                "Click to change GPU mode", lambda: self.win.show_page("gpu")),
+            "bat": self._make_pill(
+                "battery-good-symbolic", (),
+                "Click to toggle 80% / 100% battery charge limit",
+                self._toggle_charge_limit),
+            "therm": self._make_pill(
+                "weather-windy-symbolic", ("gold",),
+                "Open Fans & temperatures monitor",
+                lambda: self.win.show_page("fanmon"), ("numeric",)),
+        }
+
     def _pills(self, profile=None) -> None:
         prof = profile or self.win.profile
         st = self.hub.store
@@ -333,51 +373,27 @@ class DashboardPage(MonitorPage):
         if key == getattr(self, "_pill_key", None):
             return
         self._pill_key = key
-        child = self.pills.get_first_child()
-        while child:
-            nxt = child.get_next_sibling()
-            self.pills.remove(child)
-            child = nxt
+        self._ensure_pills()
+        pb, pimg, plbl = self._pill_widgets["prof"]
         if prof is not None:
             title, _sub, icon = PROFILE_INFO[prof]
-            b = Gtk.Button(tooltip_text=f"{title} profile — click to cycle mode")
-            b.add_css_class("quick-pill")
-            b.add_css_class("accent")
-            box = Gtk.Box(spacing=6)
-            box.append(Gtk.Image.new_from_icon_name(icon))
-            box.append(label(title))
-            b.set_child(box)
-            b.connect("clicked", lambda *_: self._cycle_profile())
-            self._append_pill(b)
+            pimg.set_from_icon_name(icon)
+            set_text(plbl, title)
+            pb.set_tooltip_text(f"{title} profile — click to cycle mode")
+        pb.get_parent().set_visible(prof is not None)
+        gb, _gimg, glbl = self._pill_widgets["gpu"]
         if self.gpu_mode is not None:
-            gname = GPU_MODE_INFO[self.gpu_mode.mode][0] + " graphics"
-            b = Gtk.Button(tooltip_text="Click to change GPU mode")
-            b.add_css_class("quick-pill")
-            box = Gtk.Box(spacing=6)
-            box.append(Gtk.Image.new_from_icon_name("applications-graphics-symbolic"))
-            box.append(label(gname))
-            b.set_child(box)
-            b.connect("clicked", lambda *_: self.win.show_page("gpu"))
-            self._append_pill(b)
+            set_text(glbl, GPU_MODE_INFO[self.gpu_mode.mode][0] + " graphics")
+        gb.get_parent().set_visible(self.gpu_mode is not None)
+        bb, _bimg, blbl = self._pill_widgets["bat"]
         if self.threshold is not None:
-            b = Gtk.Button(tooltip_text="Click to toggle 80% / 100% battery charge limit")
-            b.add_css_class("quick-pill")
-            box = Gtk.Box(spacing=6)
-            box.append(Gtk.Image.new_from_icon_name("battery-good-symbolic"))
-            box.append(label(f"Charge limit {self.threshold}%"))
-            b.set_child(box)
-            b.connect("clicked", lambda *_: self._toggle_charge_limit())
-            self._append_pill(b)
-        if cpu_t is not None or cpu_r is not None:
-            b = Gtk.Button(tooltip_text="Open Fans & temperatures monitor")
-            b.add_css_class("quick-pill")
-            b.add_css_class("gold")
-            box = Gtk.Box(spacing=6)
-            box.append(Gtk.Image.new_from_icon_name("weather-windy-symbolic"))
-            box.append(label(therm, ("numeric",)))
-            b.set_child(box)
-            b.connect("clicked", lambda *_: self.win.show_page("fanmon"))
-            self._append_pill(b)
+            set_text(blbl, f"Charge limit {self.threshold}%")
+        bb.get_parent().set_visible(self.threshold is not None)
+        tb, _timg, tlbl = self._pill_widgets["therm"]
+        show_therm = cpu_t is not None or cpu_r is not None
+        if show_therm:
+            set_text(tlbl, therm)
+        tb.get_parent().set_visible(show_therm)
 
     def on_telemetry(self, t) -> None:
         if t.profile is not None:
@@ -403,8 +419,10 @@ class DashboardPage(MonitorPage):
         set_text(self.cpu_freq, f"{f / 1000:.2f}" if f else "–")
         load = cpu.get("load")
         s = self._stats("cpu.total")
+        n_threads = static["count"]
         set_text(self.cpu.foot, (f"load {load[0]:.2f} · " if load else "") +
-                 f"{static['count']} threads" + (f" · max {s[1]:.0f} %" if s else ""))
+                 f"{n_threads} thread{'s' if n_threads != 1 else ''}"
+                 + (f" · max {s[1]:.0f} %" if s else ""))
         # memory
         mem = info.get("mem") or {}
         total = mem.get("total") or 0

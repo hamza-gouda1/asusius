@@ -83,7 +83,8 @@ def source_caption(src, now: float | None = None) -> str:
     if ts:
         bits.append(f"Firmware metadata from {age_text(ts, now)}")
     if src.source == "firmware" and src.info.get("updatable") is not None:
-        bits.append(f"{src.info['updatable']} updatable devices")
+        n_up = src.info["updatable"]
+        bits.append(f"{n_up} updatable device{'s' if n_up != 1 else ''}")
     return " · ".join(bits)
 
 
@@ -463,7 +464,8 @@ class UpdatesPage(Page):
             self.hero_icon.add_css_class("ok")
         sub = [f"Checked {age_text(rep.checked_ts)}"]
         if failed_checks:
-            sub.append(f"{failed_checks} source checks need attention; try Refresh again")
+            noun = "source check needs" if failed_checks == 1 else "source checks need"
+            sub.append(f"{failed_checks} {noun} attention; try Refresh again")
         if sec:
             sub.insert(0, f"{sec} security update{'s' if sec != 1 else ''}")
         parts = ", ".join(f"{SOURCE_TITLES.get(k, k).lower()} {v}"
@@ -522,7 +524,8 @@ class UpdatesPage(Page):
         if not st.get("enabled", True):
             text = "Off. Turn on automatic checks with the switch."
         else:
-            text = (f"asusiusd checks at most every {st.get('interval_h', 6):g} hours"
+            iv = st.get("interval_h", 6)
+            text = (f"asusiusd checks at most every {iv:g} hour{'' if iv == 1 else 's'}"
                     + (", not on metered connections" if st.get("respect_metered", True)
                        else "")
                     + (", and notifies once per new update" if st.get("notify", True)
@@ -831,7 +834,6 @@ class UpdatesPage(Page):
         run_bg(work, done=self._run_done, error=self._run_failed)
 
     def _install_deps(self, item: UpdateItem) -> None:
-        from ...updates import runner
         names = actions.deps_names(item)
         body = (actions.describe_deps(item) + "\n\nPackageKit installs these at once; the "
                 "system service asks for your password if it needs one.")
