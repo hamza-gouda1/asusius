@@ -7,8 +7,8 @@ PyGObject is imported lazily, only by GioTransport. All calls carry a timeout.
 from __future__ import annotations
 
 import re
+import threading
 import xml.etree.ElementTree as ET
-from concurrent.futures import Future
 from typing import Any, Protocol
 
 from ..core import (
@@ -56,6 +56,7 @@ class GioTransport:
         self.timeout_ms = timeout_ms
         self._conn = None
         self._gi: tuple | None = None
+        self._conn_lock = threading.Lock()
 
     def _mods(self):
         if self._gi is None:
@@ -69,15 +70,18 @@ class GioTransport:
         return self._gi
 
     def _connection(self):
-        if self._conn is not None and hasattr(self._conn, "is_closed") and self._conn.is_closed():
-            self._conn = None
-        if self._conn is None:
-            Gio, GLib = self._mods()
-            try:
-                self._conn = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
-            except GLib.Error as exc:
-                raise BackendUnavailable(f"system bus unavailable: {exc.message}") from None
-        return self._conn
+        with self._conn_lock:
+            if self._conn is not None and getattr(self._conn, "is_closed", lambda: False)():
+                self._conn = None
+            if self._conn is None:
+                from .. import dbusutil
+                self._mods()
+                try:
+                    self._conn = dbusutil.connect_bus_sync(
+                        "system", timeout_s=max(1.0, self.timeout_ms / 1000.0))
+                except dbusutil.DBusUnavailable as exc:
+                    raise BackendUnavailable(str(exc)) from None
+            return self._conn
 
     def _wrap(self, exc) -> Exception:
         msg = getattr(exc, "message", str(exc))
@@ -99,23 +103,6 @@ class GioTransport:
             raise self._wrap(exc) from None
         return res.unpack() if res is not None else None
 
-    def call_future(self, dest, path, iface, method, sig=None, args=()) -> Future:
-        """True async call; the callback fires on the thread-default GLib main context."""
-        Gio, GLib = self._mods()
-        fut: Future = Future()
-        params = GLib.Variant(sig, args) if sig else None
-
-        def done(conn, res, _data):
-            try:
-                out = conn.call_finish(res)
-                fut.set_result(out.unpack() if out is not None else None)
-            except GLib.Error as exc:
-                fut.set_exception(self._wrap(exc))
-
-        self._connection().call(dest, path, iface, method, params, None,
-                                Gio.DBusCallFlags.NONE, self.timeout_ms, None, done, None)
-        return fut
-
     def get_property(self, dest, path, iface, prop):
         return self.call(dest, path, "org.freedesktop.DBus.Properties", "Get",
                          "(ss)", (iface, prop))[0]
@@ -125,11 +112,10 @@ class GioTransport:
                          "(s)", (iface,))[0]
 
     def set_property(self, dest, path, iface, prop, sig, value):
-        _, GLib = self._mods()
-        self._connection()  # fail early
+        Gio, GLib = self._mods()
+        conn = self._connection()
         try:
-            Gio, _ = self._mods()
-            self._connection().call_sync(
+            conn.call_sync(
                 dest, path, "org.freedesktop.DBus.Properties", "Set",
                 GLib.Variant("(ssv)", (iface, prop, GLib.Variant(sig, value))), None,
                 Gio.DBusCallFlags.NONE, self.timeout_ms, None)
@@ -520,3 +506,63 @@ class DBusBackend(Backend):
         # asusd tuple order: (fan, pwm[8], temp[8], enabled)
         return {name: FanCurve.from_lists(name, list(temps), list(pwms), bool(en))
                 for name, pwms, temps, en in res}
+
+    def validate_write(self, method: str, *args) -> None:
+        if method == "set_profile":
+            if not self._owner(ASUSD):
+                self._need(PPD)
+        elif method == "set_limit":
+            name, value = args
+            if not re.fullmatch(r"[a-z0-9_]+", name):
+                raise ValidationError(f"bad attribute name {name!r}")
+            lim = next((x for x in self.get_limits() if x.name == name), None)
+            if lim is None:
+                raise ValidationError(f"unknown power limit {name!r}")
+            lim.validate(value)
+        elif method == "set_battery_threshold":
+            (value,) = args
+            if isinstance(value, bool) or not isinstance(value, int) or not 20 <= value <= 100:
+                raise ValidationError("battery threshold must be an integer in 20-100")
+            self._need(ASUSD)
+        elif method == "set_gpu_mode":
+            self._need(SUPERGFX)
+        elif method == "set_kbd_brightness":
+            (value,) = args
+            _, mx = self.get_kbd_brightness()
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= mx:
+                raise ValidationError(f"keyboard brightness must be 0-{mx}")
+        elif method == "set_kbd_effect":
+            (effect,) = args
+            effect.validate()
+            self._aura()
+        elif method == "set_attribute":
+            name, value = args
+            if not re.fullmatch(r"[a-z0-9_]+", name):
+                raise ValidationError(f"bad attribute name {name!r}")
+            if isinstance(value, bool):
+                raise ValidationError(f"{name}: boolean is not a valid attribute value")
+            self._need(ASUSD)
+            if name not in self._children(ASUSD, ARMOURY_PATH):
+                raise BackendUnavailable(f"asusd does not expose {name}")
+            try:
+                props = self.t.get_all(ASUSD, f"{ARMOURY_PATH}/{name}", ARMOURY_IFACE)
+            except (BackendError, BackendUnavailable):
+                props = {}
+            cur = props.get("CurrentValue")
+            if not isinstance(cur, str):
+                try:
+                    int(value)
+                except (TypeError, ValueError):
+                    if isinstance(value, str) and not props:
+                        raise ValidationError(
+                            f"{name}: expected integer value, got {value!r}") from None
+        elif method == "one_shot_full_charge":
+            self._need(ASUSD)
+        elif method == "set_fan_curve":
+            _profile, curve = args
+            curve.validate()
+            self._need(ASUSD)
+            if len(curve.points) != 8:
+                raise ValidationError("asusd fan curves need exactly 8 points")
+        elif method == "reset_fan_curves":
+            self._need(ASUSD)

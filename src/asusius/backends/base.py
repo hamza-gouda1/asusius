@@ -112,6 +112,10 @@ class Backend(ABC):
     def get_telemetry(self) -> Telemetry:
         self._no("telemetry")
 
+    def validate_write(self, method: str, *args) -> None:
+        """Read-only preflight for dry-run writes; raises on invalid arguments/state."""
+        return None
+
 
 def all_unavailable(reason: str) -> dict[Capability, CapStatus]:
     return {cap: CapStatus(False, reason) for cap in Capability}

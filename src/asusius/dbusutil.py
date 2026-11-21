@@ -8,6 +8,14 @@ module never escalates privileges itself.
 """
 from __future__ import annotations
 
+import threading
+from typing import Any
+
+CONNECT_TIMEOUT_S = 3.0
+_BUS_LOCK = threading.Lock()
+_IN_FLIGHT: dict[str, tuple[threading.Event, list, list, Any, list[bool]]] = {}
+_LATE_BUS: dict[str, Any] = {}
+
 
 class DBusUnavailable(RuntimeError):
     """PyGObject or the bus is missing."""
@@ -22,13 +30,72 @@ def _gio():
     return Gio, GLib
 
 
-def bus(kind: str = "system"):
+def connect_bus_sync(kind: str = "system", timeout_s: float = CONNECT_TIMEOUT_S):
+    """Connect to the shared Gio bus with a bounded wait and no duplicate connect threads."""
     Gio, GLib = _gio()
-    try:
-        return Gio.bus_get_sync(Gio.BusType.SYSTEM if kind == "system" else Gio.BusType.SESSION,
-                                None)
-    except GLib.Error as exc:
-        raise DBusUnavailable(f"{kind} bus: {exc.message}") from None
+    bus_type = Gio.BusType.SYSTEM if kind == "system" else Gio.BusType.SESSION
+    with _BUS_LOCK:
+        late = _LATE_BUS.pop(kind, None)
+        if late is not None and not getattr(late, "is_closed", lambda: False)():
+            return late
+        flight = _IN_FLIGHT.get(kind)
+        if flight is not None and flight[0].is_set():
+            _done, box, _err, _cancel, _timed_out = _IN_FLIGHT.pop(kind)
+            if box:
+                conn = box[0]
+                if not getattr(conn, "is_closed", lambda: False)():
+                    return conn
+            flight = None
+        if flight is None:
+            done = threading.Event()
+            box: list = []
+            err: list = []
+            cancel = Gio.Cancellable()
+            timed_out = [False]
+            flight = (done, box, err, cancel, timed_out)
+            _IN_FLIGHT[kind] = flight
+
+            def worker() -> None:
+                try:
+                    conn = Gio.bus_get_sync(bus_type, cancel)
+                except BaseException as exc:
+                    err.append(exc)
+                else:
+                    box.append(conn)
+                    with _BUS_LOCK:
+                        if timed_out[0]:
+                            # Never close Gio's shared singleton connection; reuse it next call.
+                            _LATE_BUS[kind] = conn
+                finally:
+                    with _BUS_LOCK:
+                        if _IN_FLIGHT.get(kind) is flight and (not timed_out[0] or err):
+                            _IN_FLIGHT.pop(kind, None)
+                    done.set()
+
+            threading.Thread(target=worker, daemon=True,
+                             name=f"asusius-dbus-connect-{kind}").start()
+        else:
+            done, box, err, cancel, timed_out = flight
+    if not done.wait(timeout_s):
+        timed_out[0] = True
+        cancel.cancel()
+        raise DBusUnavailable(f"{kind} bus connect exceeded {timeout_s:g}s") from None
+    with _BUS_LOCK:
+        if _IN_FLIGHT.get(kind) is flight:
+            _IN_FLIGHT.pop(kind, None)
+    if err:
+        exc = err[0]
+        if isinstance(exc, GLib.Error):
+            raise DBusUnavailable(f"{kind} bus: {exc.message}") from None
+        msg = getattr(exc, "message", None) or str(exc)
+        raise DBusUnavailable(f"{kind} bus: {msg}") from None
+    if not box:
+        raise DBusUnavailable(f"{kind} bus unavailable")
+    return box[0]
+
+
+def bus(kind: str = "system"):
+    return connect_bus_sync(kind)
 
 
 def call(kind: str, name: str, path: str, iface: str, method: str, args=None,

@@ -15,7 +15,7 @@ from ..core import (
     Unsupported,
     ValidationError,
 )
-from .base import Backend
+from .base import Backend, all_unavailable
 from .util import run_cmd
 
 _NAME = r"[a-z0-9_]{1,40}"
@@ -62,16 +62,16 @@ class CliBackend(Backend):
     def probe(self):
         exe = shutil.which(self.binary)
         if exe is None:
-            return {c: CapStatus(False, "asusctl not installed") for c in Capability}
+            return all_unavailable("asusctl not installed")
         try:
             run_cmd([exe, "info"], timeout=min(self.timeout, 1.5))
         except BackendUnavailable:
-            return {c: CapStatus(False, "asusctl not installed") for c in Capability}
+            return all_unavailable("asusctl not installed")
         except BackendError as exc:
             msg = str(exc)
             if any(k in msg for k in ("ServiceUnknown", "NameHasNoOwner", "D-Bus", "dbus")):
-                return {c: CapStatus(False, f"asusd unreachable via asusctl: {msg}")
-                        for c in Capability}
+                return all_unavailable(f"asusd unreachable via asusctl: {msg}")
+            return all_unavailable(f"asusctl info failed: {msg}")
         ok = CapStatus(True)
         no = CapStatus(False, "not exposed by asusctl wrapper")
         return {
@@ -118,11 +118,22 @@ class CliBackend(Backend):
         return LED_LEVELS.index(token), len(LED_LEVELS) - 1
 
     def set_kbd_brightness(self, value: int) -> None:
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            raise ValidationError("keyboard brightness must be a non-negative integer")
-        if value >= len(LED_LEVELS):
-            raise Unsupported(f"asusctl leds supports 0-{len(LED_LEVELS) - 1} only")
+        self.validate_write("set_kbd_brightness", value)
         self._run(["leds", "set", LED_LEVELS[value]])
+
+    def validate_write(self, method: str, *args) -> None:
+        if method == "set_battery_threshold":
+            (value,) = args
+            if isinstance(value, bool) or not isinstance(value, int) or not 20 <= value <= 100:
+                raise ValidationError("battery threshold must be an integer in 20-100")
+        elif method == "set_kbd_brightness":
+            (value,) = args
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValidationError("keyboard brightness must be a non-negative integer")
+            if value >= len(LED_LEVELS):
+                raise Unsupported(f"asusctl leds supports 0-{len(LED_LEVELS) - 1} only")
+        if shutil.which(self.binary) is None:
+            raise BackendUnavailable("asusctl not installed")
 
 
 __all__ = ["CliBackend", "check_args", "Unsupported"]

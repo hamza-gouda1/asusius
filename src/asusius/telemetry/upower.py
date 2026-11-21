@@ -90,6 +90,7 @@ class GioUpowerTransport:
         self._gi: tuple | None = None
         self._conn: Any | None = None
         self._connection_lock = threading.Lock()
+        self._in_flight: tuple | None = None
 
     def _mods(self) -> tuple:
         if self._gi is None:
@@ -111,23 +112,37 @@ class GioUpowerTransport:
         if self._conn is not None and getattr(self._conn, "is_closed", lambda: False)():
             self._conn = None
         if self._conn is None:
-            box, err, done = [], [], threading.Event()
-            cancel = Gio.Cancellable()
+            flight = self._in_flight
+            if flight is not None and flight[0].is_set():
+                _done, box, _err, _cancel = flight
+                self._in_flight = None
+                if box and not getattr(box[0], "is_closed", lambda: False)():
+                    self._conn = box[0]
+                    return self._conn
+                flight = None
+            if flight is None:
+                box, err, done = [], [], threading.Event()
+                cancel = Gio.Cancellable()
+                flight = (done, box, err, cancel)
+                self._in_flight = flight
 
-            def connect() -> None:
-                try:
-                    box.append(Gio.bus_get_sync(Gio.BusType.SYSTEM, cancel))
-                except BaseException as exc:  # GLib.Error or anything else
-                    err.append(exc)
-                finally:
-                    done.set()
+                def connect() -> None:
+                    try:
+                        box.append(Gio.bus_get_sync(Gio.BusType.SYSTEM, cancel))
+                    except BaseException as exc:  # GLib.Error or anything else
+                        err.append(exc)
+                    finally:
+                        done.set()
 
-            threading.Thread(target=connect, daemon=True,
-                             name="asusius-upower-connect").start()
+                threading.Thread(target=connect, daemon=True,
+                                 name="asusius-upower-connect").start()
+            else:
+                done, box, err, cancel = flight
             if not done.wait(CONNECT_TIMEOUT_S):
                 cancel.cancel()
                 raise UpowerUnavailable(
                     f"system bus connect exceeded {CONNECT_TIMEOUT_S:g}s") from None
+            self._in_flight = None
             if err:
                 raise UpowerUnavailable(f"system bus unavailable: {_msg(err[0])}") from None
             self._conn = box[0]

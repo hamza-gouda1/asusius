@@ -8,12 +8,11 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .backends.base import OPERATIONS, Backend
+from .backends.base import OPERATIONS, Backend, all_unavailable
 from .core import (
     BackendError,
     BackendUnavailable,
     Capability,
-    CapStatus,
     FanCurve,
     FirmwareAttribute,
     GpuAction,
@@ -68,8 +67,7 @@ class Controller:
                 try:
                     probes[b.name] = b.probe()
                 except Exception as exc:  # a broken backend must not break discovery
-                    probes[b.name] = {c: CapStatus(False, f"probe failed: {exc}")
-                                      for c in Capability}
+                    probes[b.name] = all_unavailable(f"probe failed: {exc}")
             self._probes, self._probed_at = probes, now
         return self._probes
 
@@ -119,7 +117,15 @@ class Controller:
         assert method
         errors = []
         for b in (self.providers(cap) if backends is None else backends):
+            if getattr(type(b), method, None) is getattr(Backend, method, None):
+                errors.append(f"{b.name}: {method} not supported")
+                continue
             if dry_run:
+                try:
+                    b.validate_write(method, *args)
+                except (BackendUnavailable, Unsupported) as exc:
+                    errors.append(f"{b.name}: {exc}")
+                    continue
                 return WriteResult(False, b.name, f"dry run: would {detail}")
             try:
                 out = getattr(b, method)(*args)

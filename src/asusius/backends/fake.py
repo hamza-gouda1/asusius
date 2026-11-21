@@ -35,10 +35,12 @@ _ATTRS = {
     "nv_temp_target": ("integer", 87, 87, 75, 87, None, "Set the Nvidia max thermal limit"),
     "nv_tgp": ("integer", 0, 0, 0, 25, None, "Set the additional TGP on top of the base TGP"),
     "nv_base_tgp": ("integer", 80, None, None, None, None, "Read the base TGP value"),
-    "charge_mode": ("enumeration", 0, None, None, None, "0;1;2", "Show the current mode of charging"),
+    "charge_mode": ("enumeration", 0, None, None, None, "0;1;2",
+                    "Show the current mode of charging"),
     "dgpu_disable": ("enumeration", 0, None, None, None, "0;1", "Disable the dGPU"),
     "gpu_mux_mode": ("enumeration", 1, None, None, None, "0;1", "Set the GPU display MUX mode"),
-    "panel_overdrive": ("enumeration", 1, None, None, None, "0;1", "Set the panel refresh overdrive"),
+    "panel_overdrive": ("enumeration", 1, None, None, None, "0;1",
+                        "Set the panel refresh overdrive"),
     "screen_auto_brightness": ("enumeration", 0, None, None, None, "0;1", "Panel auto brightness"),
 }
 
@@ -217,3 +219,15 @@ class FakeBackend(SysfsBackend):
 
     def one_shot_full_charge(self) -> None:
         self.set_battery_threshold(100)
+
+    def validate_write(self, method: str, *args) -> None:
+        if method == "set_gpu_mode":
+            self._load("gfx.json")
+        elif method == "set_kbd_effect":
+            (effect,) = args
+            effect.validate()
+            self._load("aura.json")
+        elif method == "one_shot_full_charge":
+            self.validate_write("set_battery_threshold", 100)
+        else:
+            super().validate_write(method, *args)

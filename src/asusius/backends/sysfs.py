@@ -137,7 +137,8 @@ class SysfsBackend(Backend):
         full = bat is not None and (
             (bat / "energy_full_design").exists() or (bat / "charge_full_design").exists()
         )
-        st[Capability.BATTERY_HEALTH] = ok if full else CapStatus(False, "battery energy not present")
+        st[Capability.BATTERY_HEALTH] = (
+            ok if full else CapStatus(False, "battery energy not present"))
         if (self.armoury / "gpu_mux_mode").exists() or (self.armoury / "dgpu_disable").exists():
             st[Capability.GPU_MODE] = CapStatus(True, "inferred from mux/dgpu attributes")
         else:
@@ -382,6 +383,58 @@ class SysfsBackend(Backend):
         else:
             for p, v in pairs:
                 self.writer.write(p, v)
+
+    def validate_write(self, method: str, *args) -> None:
+        if method == "set_profile":
+            (profile,) = args
+            choices = self._choices()
+            if choices and profile not in choices:
+                raise ValidationError(f"profile {profile.value} not offered by firmware")
+        elif method == "set_limit":
+            name, value = args
+            if not re.fullmatch(r"[a-z0-9_]+", name):
+                raise ValidationError(f"bad attribute name {name!r}")
+            lim = next((x for x in self.get_limits() if x.name == name), None)
+            if lim is None:
+                raise ValidationError(f"unknown power limit {name!r}")
+            lim.validate(value)
+        elif method == "set_battery_threshold":
+            (value,) = args
+            lo, hi = BATTERY_RANGE
+            if isinstance(value, bool) or not isinstance(value, int) or not lo <= value <= hi:
+                raise ValidationError(f"battery threshold must be an integer in {lo}-{hi}")
+            if self.battery_dir is None:
+                raise BackendUnavailable("no battery")
+        elif method == "set_attribute":
+            name, value = args
+            if not re.fullmatch(r"[a-z0-9_]+", name):
+                raise ValidationError(f"bad attribute name {name!r}")
+            attr = next((a for a in self.get_attributes() if a.name == name), None)
+            if attr is None:
+                raise ValidationError(f"unknown attribute {name!r}")
+            if attr.type == "integer":
+                self.validate_write("set_limit", name, int(value))
+            elif attr.possible_values and str(value) not in attr.possible_values:
+                raise ValidationError(
+                    f"{name}: {value} not one of {', '.join(attr.possible_values)}")
+        elif method == "set_kbd_brightness":
+            (value,) = args
+            _, mx = self.get_kbd_brightness()
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= mx:
+                raise ValidationError(f"keyboard brightness must be 0-{mx}")
+        elif method == "set_fan_curve":
+            profile, curve = args
+            curve.validate()
+            self._check_active(profile)
+            hw = self._hwmon("asus_custom_fan_curve")
+            idx = self._FAN_INDEX.get(curve.fan.upper())
+            if hw is None or idx is None:
+                raise BackendUnavailable(f"no custom fan curve for {curve.fan}")
+        elif method == "reset_fan_curves":
+            (profile,) = args
+            self._check_active(profile)
+            if self._hwmon("asus_custom_fan_curve") is None:
+                raise BackendUnavailable("asus_custom_fan_curve not present")
 
     # -- telemetry ------------------------------------------------------------
     def get_telemetry(self) -> Telemetry:
