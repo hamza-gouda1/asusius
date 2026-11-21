@@ -90,8 +90,9 @@ def classify(name: str, facts: dict | None) -> dict | None:
     if new:
         return {"blocker": "needs-new", "title": TITLES["needs-new"],
                 "reason": f"It needs packages that are not installed yet: {_names(new)}. "
-                          "An upgrade without new dependencies (apt-get upgrade or PackageKit's Update) only upgrades "
-                          "installed packages, so it stays behind until those are installed.",
+                          "An upgrade without new dependencies (apt-get upgrade or "
+                          "PackageKit's Update) only upgrades installed packages, so "
+                          "it stays behind until those are installed.",
                 "command": "sudo apt full-upgrade", "fixable": True}
     return {"blocker": "unknown", "title": TITLES["unknown"],
             "reason": "apt keeps it back without a reason it reports here.",

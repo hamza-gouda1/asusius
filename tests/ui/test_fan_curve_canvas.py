@@ -33,7 +33,11 @@ class CanvasDouble:
         self.grab_focus = Mock()
         self.set_cursor_from_name = Mock()
         self._hit = Mock(return_value=2)
-        self.geometry = lambda: CurveGeometry(600, 300)
+        self.geometry = _fixed_geometry
+
+
+def _fixed_geometry():
+    return CurveGeometry(600, 300)
 
 
 def curve_model():

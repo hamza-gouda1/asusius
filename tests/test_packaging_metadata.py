@@ -26,7 +26,9 @@ REPO_URL_FILES = (
 ICON = "data/icons/hicolor/scalable/apps/io.github.hamzagouda.Asusius.svg"
 SYMBOLIC_ICON = "data/icons/hicolor/scalable/apps/io.github.hamzagouda.Asusius-symbolic.svg"
 UI_ICON = "src/asusius/ui/icons/hicolor/scalable/apps/io.github.hamzagouda.Asusius.svg"
-UI_SYMBOLIC_ICON = "src/asusius/ui/icons/hicolor/scalable/apps/io.github.hamzagouda.Asusius-symbolic.svg"
+UI_SYMBOLIC_ICON = (
+    "src/asusius/ui/icons/hicolor/scalable/apps/io.github.hamzagouda.Asusius-symbolic.svg"
+)
 HERO_DARK = "docs/brand/asusius-hero-dark.svg"
 HERO_LIGHT = "docs/brand/asusius-hero-light.svg"
 

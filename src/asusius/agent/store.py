@@ -44,7 +44,8 @@ def _mkdir(p: Path) -> None:
 def locked(path: Path) -> Iterator[None]:
     """Exclusive flock on a sibling .lock file for read-modify-write cycles."""
     _mkdir(path.parent)
-    fd = os.open(path.with_name(path.name + ".lock"), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    fd = os.open(path.with_name(path.name + ".lock"),
+                 os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise OSError("state lock is not a regular file")

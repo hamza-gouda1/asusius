@@ -84,7 +84,8 @@ MODE_SIZES = ("1280x720", "640x700")
 MEM_MODES = ("mem-default", "mem-pin", "mem-missing", "mem-apps")
 MEM_JOBS = (("dark", "1280x720"), ("light", "1280x720"), ("dark", "360x640"))
 SCALE_SUFFIX = "@scale"
-THEME_PAIR_PAGES = ("dashboard", "performance", "fans", "battery", "processes")  # not the keyboard: live colour
+# not the keyboard: live colour
+THEME_PAIR_PAGES = ("dashboard", "performance", "fans", "battery", "processes")
 # battery QA mode -> scenario name in telemetry.fake.fake_upower_client
 BAT_SCENARIOS = {"bat-hist": "populated", "bat-short": "short", "bat-empty": "empty",
                  "bat-charging": "populated", "bat-periph": "peripheral",
@@ -235,7 +236,8 @@ def outer(args) -> int:
                 dt = time.time() - t0
                 text = log.read_text(errors="replace")
                 if os.environ.get("ASUSIUS_QA_DEBUG_FOCUS"):
-                    print("\n".join(x for x in text.splitlines() if x.startswith(("FOCUS","STUCK"))))
+                    print("\n".join(x for x in text.splitlines()
+                                    if x.startswith(("FOCUS", "STUCK"))))
                 res = {}
                 rp = Path(job["result"])
                 if rp.exists():
@@ -370,7 +372,11 @@ def child(job: dict) -> int:
             orig_ensure(r)
             strip_hardware(Path(r))
         fake.ensure = ensure_stripped
-        fake.FakeWorld.advance = lambda self, now: None
+
+        def _no_advance(_self, _now):
+            return None
+
+        fake.FakeWorld.advance = _no_advance
         strip_hardware(root)
     if mode == "gpu-lost":
         from asusius.telemetry.gpu_nvidia import NvidiaGpu
@@ -405,7 +411,11 @@ def child(job: dict) -> int:
             orig_ensure(r)
             shutil.rmtree(Path(r) / "sys/class/power_supply", ignore_errors=True)
         tfake.ensure = ensure_no_power
-        tfake.FakeWorld.advance = lambda self, now: None  # it would rewrite BAT0
+
+        def _no_advance(_self, _now):
+            return None
+
+        tfake.FakeWorld.advance = _no_advance  # it would rewrite BAT0
         shutil.rmtree(root / "sys/class/power_supply", ignore_errors=True)
     if mem_mode:
         # world_mode is injected by wrapping LiveHub (window.py is never modified);
@@ -707,7 +717,8 @@ def child(job: dict) -> int:
                         if not pill.get_mapped():
                             continue
                         pill_ok, bounds = pill.compute_bounds(page)
-                        if limits_ok and pill_ok and bounds.get_y() + bounds.get_height() > limits.get_y():
+                        if (limits_ok and pill_ok
+                                and bounds.get_y() + bounds.get_height() > limits.get_y()):
                             emit(Finding("overlap", "fail", key, "live readings and Power limits",
                                          f"{pill.get_label()} extends into the next section"))
                 if key == "storage" and not real and mode == "":
@@ -724,8 +735,9 @@ def child(job: dict) -> int:
                         page.units_app.set_active(True)
                         page.mode_rings.set_active(True)
                         if page._metric(result.node(result.root)) != result.totals["apparent"]:
-                            emit(Finding("disk-scan", "fail", key, "size mode",
-                                         "the apparent size toggle did not update the active metric"))
+                            emit(Finding(
+                                "disk-scan", "fail", key, "size mode",
+                                "the apparent size toggle did not update the active metric"))
                         children = result.children(result.root)
                         if children:
                             page.dmap.drill(children[0])
@@ -998,7 +1010,8 @@ def child(job: dict) -> int:
         win.show_page("automation")
         yield 900
         page = win.pages["automation"]
-        for scope, rid in (("dialog:rule-edit", "games-get-performance"), ("dialog:rule-new", None)):
+        for scope, rid in (("dialog:rule-edit", "games-get-performance"),
+                           ("dialog:rule-new", None)):
             dlg = page.open_editor(rid)
             yield 700
             if rid:
@@ -1014,7 +1027,6 @@ def child(job: dict) -> int:
     def dialog_pass(win, aud, scope, accept=False):
         yield 700
         dlg = win.last_dialog
-        content = find_gtype(dlg, "AdwAlertDialog") or dlg
         # the visible sheet is the child that is not the full-window dimming layer
         sheet = sheet_of(dlg, win)
         qa.dialog_geometry(emit, win, scope, dlg, sheet)

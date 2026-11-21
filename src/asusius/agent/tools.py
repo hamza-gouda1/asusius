@@ -880,5 +880,5 @@ TOOL_CAPS = {"set_platform_profile": "profile", "set_charge_limit": "battery_thr
 NAME_FILTER = {"type": "string", "pattern": r"^[A-Za-z0-9 ._+:@-]{1,32}$",
                "description": "Case-insensitive substring of the process name or app id."}
 
-from .catalog import build_tools
+from .catalog import build_tools  # noqa: E402
 TOOLS = build_tools()

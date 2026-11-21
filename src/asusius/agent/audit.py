@@ -92,7 +92,8 @@ class AuditLog:
     def _append(self, p: Path, line: bytes) -> None:
         try:
             p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            fd = os.open(p.with_name(p.name + ".lock"), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+            fd = os.open(p.with_name(p.name + ".lock"),
+                         os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
             try:
                 if not stat.S_ISREG(os.fstat(fd).st_mode):
                     raise OSError("audit lock is not a regular file")

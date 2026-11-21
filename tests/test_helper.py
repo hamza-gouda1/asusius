@@ -59,7 +59,8 @@ class HelperTests(unittest.TestCase):
     def test_not_on_allow_list(self):
         for path in ("/etc/passwd", "/sys/power/state", "relative/path",
                      "/sys/class/power_supply/BAT0/status",
-                     "/sys/class/firmware-attributes/asus-armoury/attributes/x/../../../../../../etc/passwd",
+                     "/sys/class/firmware-attributes/asus-armoury/"
+                     "attributes/x/../../../../../../etc/passwd",
                      "/sys/../etc/passwd"):
             with self.assertRaises(helper.Rejected, msg=path):
                 self.w(path, "1")
@@ -167,7 +168,8 @@ class HelperTests(unittest.TestCase):
 class FallbackTests(unittest.TestCase):
     def test_fallback_only_on_privilege(self):
         class Deny:
-            def write(self, p, v): raise PrivilegeRequired("no")
+            def write(self, p, v):
+                raise PrivilegeRequired("no")
         rec = RecordingWriter()
         FallbackWriter(Deny(), rec).write(Path("/x"), "1")
         self.assertEqual(len(rec.writes), 1)

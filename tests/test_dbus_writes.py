@@ -11,7 +11,8 @@ class Rec:
     def __init__(self):
         self.calls, self.sets = [], []
 
-    def name_has_owner(self, n): return True
+    def name_has_owner(self, n):
+        return True
     def introspect(self, d, p):
         return '<node><node name="tuf"/></node>'
     def get_property(self, d, p, i, prop):

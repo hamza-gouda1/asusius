@@ -10,7 +10,8 @@ from asusius.updates import firmware
 
 class FirmwareIdentityTests(unittest.TestCase):
     def test_devices_with_matching_prefix_keep_separate_results(self):
-        data = json.loads((Path(__file__).parent / "fixtures/updates/fwupd_prefix_collision.json").read_text())
+        fixture = Path(__file__).parent / "fixtures/updates/fwupd_prefix_collision.json"
+        data = json.loads(fixture.read_text())
         items, _info = firmware.parse(data["devices"], data["upgrades"])
         by_id = {item.id: item for item in items}
         self.assertEqual(len(by_id), 2)

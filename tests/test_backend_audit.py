@@ -36,8 +36,9 @@ class DependencySafetyTests(unittest.TestCase):
         for facts in ({"dpkg_hold": True}, {"removals": ["essential"]},
                       {"held_involved": ["libnvidia-gl-580"]}, {"broken": True},
                       {"new_packages": ["--bad-option"]}):
-            with self.subTest(facts=facts), mock.patch.object(actions, "_fake", return_value=False), \
-                    mock.patch.object(actions, "pk_install") as install:
+            with (self.subTest(facts=facts),
+                  mock.patch.object(actions, "_fake", return_value=False),
+                  mock.patch.object(actions, "pk_install") as install):
                 result = actions.apply_deps(pkg(**facts))
                 self.assertTrue(result["packagekit-deps"].startswith("error:"))
                 install.assert_not_called()
@@ -462,7 +463,8 @@ class FlatpakProgressTests(unittest.TestCase):
     def test_streaming_child_reports_progress_without_flatpak(self):
         import sys
         st = progress.RunState()
-        cmd = [sys.executable, "-u", "-c", "print('Downloading app 40%',flush=True);print('Done',flush=True)"]
+        cmd = [sys.executable, "-u", "-c",
+               "print('Downloading app 40%',flush=True);print('Done',flush=True)"]
         with mock.patch("asusius.updates.flatpak.update_cmd", return_value=cmd):
             self.assertEqual(actions.flatpak_update("user", ["demo.App"],
                              watch=st.watcher("flatpak-user")), "flatpak (user) updated")

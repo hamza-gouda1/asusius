@@ -328,7 +328,8 @@ def check(root: Path = Path("/"), *, use_python_apt: bool = True) -> SourceResul
             items = {i.id: i for i in parse_apt_get_sim(full) if i.current}
             if shutil.which("apt"):
                 try:
-                    items.update({i.id: i for i in parse_apt_list(_run(["apt", "list", "--upgradable"]))})
+                    raw_apt = _run(["apt", "list", "--upgradable"])
+                    items.update({i.id: i for i in parse_apt_list(raw_apt)})
                 except (RuntimeError, OSError, subprocess.SubprocessError):
                     pass
             holds = dpkg_holds(root)

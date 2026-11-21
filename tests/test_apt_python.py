@@ -94,8 +94,10 @@ class AptCacheFixture:
         dep.mark_install.side_effect = install
         for method, action in (("marked_upgrade", "upgrade"), ("marked_install", "install"),
                                ("marked_delete", "remove")):
-            getattr(dep, method).side_effect = lambda p, action=action: self.marks.get(
-                p.name, {}).get(action, False)
+            def _marked(p, act=action):
+                return self.marks.get(p.name, {}).get(act, False)
+
+            getattr(dep, method).side_effect = _marked
         return dep
 
 

@@ -520,12 +520,16 @@ class DaemonAutomationServicesEffectsAgentTests(unittest.TestCase):
 
         b = SystemdBackend("user")
         b._conn = SimpleNamespace(is_closed=lambda: True)
-        b._call = lambda method, *_a, **_kw: (
-            [[("existing.service", "Desc", "loaded", "active", "exited", "", 0, "/p")]],
-            [[("/etc/systemd/user/existing.service", "enabled"),
-              ("/etc/systemd/user/dormant.service", "disabled"),
-              ("/etc/systemd/user/tmpl@.service", "static")]],
-        )[0 if method == "ListUnits" else 1]
+
+        def _call(method, *_a, **_kw):
+            return (
+                [[("existing.service", "Desc", "loaded", "active", "exited", "", 0, "/p")]],
+                [[("/etc/systemd/user/existing.service", "enabled"),
+                  ("/etc/systemd/user/dormant.service", "disabled"),
+                  ("/etc/systemd/user/tmpl@.service", "static")]],
+            )[0 if method == "ListUnits" else 1]
+
+        b._call = _call
         units = b.list_units(force_files=True)
         names = [x.name for x in units]
         self.assertIn("dormant.service", names)

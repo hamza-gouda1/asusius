@@ -135,7 +135,8 @@ class ExtensionPresence(unittest.TestCase):
             self.assertTrue(gest.available)
         finally:
             shutil.rmtree(ext_dir)
-        self.assertFalse(touchpad.GestureSettings(backend=kf_backend()).available)  # gone again: not installed
+        self.assertFalse(  # gone again: not installed
+            touchpad.GestureSettings(backend=kf_backend()).available)
 
     def test_found_in_xdg_data_dirs_system_package(self):
         """System package layout (Arch PKGBUILD / distro /usr/share install) is discovered."""
@@ -459,7 +460,9 @@ class SessionDiagnostics(unittest.TestCase):
             (2, "", "Extension asusius-quick@hamza-gouda does not exist\n", "needs_relogin", None),
         )
         for rc, out, err, want_state, want_enabled in cases:
-            runner = lambda _cmd, r=rc, o=out, e=err: subprocess.CompletedProcess([], r, o, e)
+            def runner(_cmd, r=rc, o=out, e=err):
+                return subprocess.CompletedProcess([], r, o, e)
+
             info = touchpad.session_info(runner=runner)
             self.assertEqual(info.shell_state, want_state)
             self.assertEqual(info.enabled, want_enabled)

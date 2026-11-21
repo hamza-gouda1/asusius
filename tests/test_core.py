@@ -53,18 +53,22 @@ class FanCurveTests(unittest.TestCase):
             FanCurve.from_lists("CPU", self.temps[:7], self.pwms[:7]).validate()
 
     def test_non_monotonic(self):
-        t = list(self.temps); t[3] = 50
+        t = list(self.temps)
+        t[3] = 50
         with self.assertRaises(ValidationError):
             FanCurve.from_lists("CPU", t, self.pwms).validate()
-        p = list(self.pwms); p[4] = 10
+        p = list(self.pwms)
+        p[4] = 10
         with self.assertRaises(ValidationError):
             FanCurve.from_lists("CPU", self.temps, p).validate()
 
     def test_ranges(self):
-        p = list(self.pwms); p[-1] = 256
+        p = list(self.pwms)
+        p[-1] = 256
         with self.assertRaises(ValidationError):
             FanCurve.from_lists("CPU", self.temps, p).validate()
-        t = list(self.temps); t[-1] = 120
+        t = list(self.temps)
+        t[-1] = 120
         with self.assertRaises(ValidationError):
             FanCurve.from_lists("CPU", t, self.pwms).validate()
 

@@ -167,8 +167,11 @@ class ControllerTests(TreeCase):
 
     def test_dbus_backend_with_fake_transport(self):
         class T:
-            def name_has_owner(self, n): return n == "net.hadess.PowerProfiles"
-            def get_property(self, d, p, i, prop): return "power-saver"
+            def name_has_owner(self, n):
+                return n == "net.hadess.PowerProfiles"
+
+            def get_property(self, d, p, i, prop):
+                return "power-saver"
         be = DBusBackend(T())
         caps = be.probe()
         self.assertTrue(caps[Capability.PROFILE].available)
@@ -184,9 +187,14 @@ class ControllerTests(TreeCase):
                     'introspect.dtd">\n<node><node name="attributes"/><node name="leds"/>'
                     '</node>')
         class T:
-            def name_has_owner(self, n): return True
-            def get_property(self, d, p, i, prop): return ""
-            def introspect(self, d, p): return STANDARD
+            def name_has_owner(self, n):
+                return True
+
+            def get_property(self, d, p, i, prop):
+                return ""
+
+            def introspect(self, d, p):
+                return STANDARD
         be = DBusBackend(T())
         self.assertEqual(be._children("xyz.ljones.Asusd", "/"), ["attributes", "leds"])
 

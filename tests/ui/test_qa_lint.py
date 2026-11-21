@@ -109,14 +109,14 @@ class LogTests(unittest.TestCase):
 
     def test_parse(self):
         lines = q.parse_log(self.SAMPLE)
-        levels = [(l.domain, l.level) for l in lines]
+        levels = [(line.domain, line.level) for line in lines]
         self.assertIn(("Gtk", "WARNING"), levels)
         self.assertIn(("Gtk", "DEBUG"), levels)
         self.assertIn(("Gdk", "CRITICAL"), levels)
         self.assertIn(("Python", "ERROR"), levels)
 
     def test_failures_are_deduplicated_and_filtered(self):
-        texts = [l.text for l in q.log_failures(self.SAMPLE)]
+        texts = [line.text for line in q.log_failures(self.SAMPLE)]
         self.assertEqual(sum("Negative content width" in t for t in texts), 1)
         self.assertTrue(any("gdk_surface_do_thing" in t for t in texts))
         self.assertTrue(any("ValueError: boom" in t for t in texts))
@@ -203,9 +203,16 @@ class SnapshotTargetTests(unittest.TestCase):
         # Application content excludes Adw.Dialog; capture its enclosing host.
         self.assertIs(snapshot_widget(window), dialog_host)
         partial = SimpleNamespace(get_width=lambda: 340, get_height=lambda: 600)
-        window.get_child = lambda: partial
+
+        def _get_partial():
+            return partial
+
+        def _get_none():
+            return None
+
+        window.get_child = _get_partial
         self.assertIs(snapshot_widget(window), window)
-        window.get_child = lambda: None
+        window.get_child = _get_none
         self.assertIs(snapshot_widget(window), window)
         self.assertIs(snapshot_widget(content), content)
 
@@ -237,7 +244,11 @@ class ToastOcclusionTests(unittest.TestCase):
         with patch("qa_audit.children", return_value=[toast]), patch(
                 "qa_audit.rect_in", return_value=(10, 20, 100, 40)):
             self.assertEqual(toast_rects(root, root), [(10, 20, 100, 40)])
-            toast.get_mapped = lambda: False
+
+            def _not_mapped():
+                return False
+
+            toast.get_mapped = _not_mapped
             self.assertEqual(toast_rects(root, root), [])
 
 

@@ -111,7 +111,8 @@ def build_tools() -> dict:
         Tool("set_keyboard_brightness", "Set keyboard brightness",
              "Set the keyboard backlight level (0 = off; the maximum comes from the hardware, "
              "often 3). Dry run by default.",
-             "basic", wobj({"level": {"type": "integer", "minimum": 0, "maximum": 65535}}, ["level"]),
+             "basic", wobj({"level": {"type": "integer", "minimum": 0, "maximum": 65535}},
+                           ["level"]),
              w_set_keyboard_brightness, rate=10, writes=True, read_only=False),
         Tool("run_automation_dry_run", "Automation dry run",
              "Evaluate the owner's automation rules against the current (or overridden) inputs "
@@ -158,7 +159,8 @@ def build_tools() -> dict:
              "HIGH RISK. Reset fan curves (for a profile, default the active one) and/or power "
              "limits to the firmware defaults. Needs control-all, enabled high-risk tools and a "
              "per-call approval.",
-             "high", wobj({"scope": {"type": "string", "enum": ["fan_curves", "power_limits", "all"],
+             "high", wobj({"scope": {"type": "string",
+                                     "enum": ["fan_curves", "power_limits", "all"],
                                      "default": "all"},
                            "profile": PROFILE_ENUM}),
              w_restore_defaults, rate=4, writes=True, read_only=False, destructive=True),

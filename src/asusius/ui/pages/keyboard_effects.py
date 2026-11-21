@@ -17,10 +17,10 @@ from ...effects.registry import EFFECTS
 from ...effects.theme import theme_accent
 from ..tasks import run_bg
 from ..viewmodels import PALETTES, FrameGate
-
-HW_NOTE = "Runs on the keyboard itself, no CPU cost."
 from ..widgets import _round_rect, label, palette_buttons
 from .base import button, info_row, pill
+
+HW_NOTE = "Runs on the keyboard itself, no CPU cost."
 
 NAMES = list(EFFECTS)
 

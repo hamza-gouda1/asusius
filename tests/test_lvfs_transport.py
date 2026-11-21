@@ -27,8 +27,8 @@ class LvfsTransportTests(unittest.TestCase):
         tls.makefile.return_value = io.BytesIO(response)
         context = mock.Mock()
         context.wrap_socket.return_value = tls
-        default_context = stack.enter_context(mock.patch.object(actions.ssl, "create_default_context",
-                                                                return_value=context))
+        default_context = stack.enter_context(
+            mock.patch.object(actions.ssl, "create_default_context", return_value=context))
         return dns, sockets, raw, tls, context, default_context
 
     def test_connects_to_vetted_address_with_original_hostname_tls_and_host_header(self):
@@ -111,7 +111,10 @@ class LvfsTransportTests(unittest.TestCase):
     def test_tls_handshake_uses_only_the_remaining_connect_budget(self):
         _, _, raw, _, context, _ = self.transport()
         now = [0.0]
-        raw.connect.side_effect = lambda _address: now.__setitem__(0, 59.0)
+        def _bump59(_address):
+            now[0] = 59.0
+
+        raw.connect.side_effect = _bump59
         with mock.patch.object(actions.time, "monotonic", side_effect=lambda: now[0]):
             self.assertEqual(actions._fetch_lvfs(URL), b"cabinet")
         self.assertEqual(raw.settimeout.call_args_list,
@@ -121,7 +124,10 @@ class LvfsTransportTests(unittest.TestCase):
     def test_expired_connect_budget_never_starts_tls(self):
         _, _, raw, _, context, _ = self.transport()
         now = [0.0]
-        raw.connect.side_effect = lambda _address: now.__setitem__(0, 60.0)
+        def _bump60(_address):
+            now[0] = 60.0
+
+        raw.connect.side_effect = _bump60
         with mock.patch.object(actions.time, "monotonic", side_effect=lambda: now[0]):
             with self.assertRaises(TimeoutError):
                 actions._fetch_lvfs(URL)
@@ -214,7 +220,8 @@ class LvfsTransportTests(unittest.TestCase):
 
     def test_redirect_is_refused_and_connection_closed(self):
         dns, _, _, tls, _, _ = self.transport(
-            b"HTTP/1.1 302 Found\r\nLocation: https://127.0.0.1/secret\r\nContent-Length: 0\r\n\r\n")
+            b"HTTP/1.1 302 Found\r\nLocation: https://127.0.0.1/secret\r\n"
+            b"Content-Length: 0\r\n\r\n")
         with self.assertRaisesRegex(actions.ActionError, "redirect"):
             actions._fetch_lvfs(URL)
         dns.assert_called_once()

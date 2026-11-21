@@ -13,7 +13,8 @@ from asusius.brand_palette import ACCENTS, HEX_PALETTES
 from asusius.effects import plugins, theme
 
 REPO = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("sync_tuf_palette", REPO / "tools/sync_tuf_palette.py")
+SPEC = importlib.util.spec_from_file_location(
+    "sync_tuf_palette", REPO / "tools/sync_tuf_palette.py")
 sync = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(sync)
 
@@ -35,7 +36,10 @@ class PaletteTests(unittest.TestCase):
         for scheme, variant in (("dark", "Bordeaux"), ("light", "Merlot-Day")):
             lines.append(f"[variant.{variant}.palette]")
             lines += [f"{key} = {json.dumps(value)}" for key, value in HEX_PALETTES[scheme].items()]
-        lines += ["[variant.Oxblood-Noir.palette]", f"accent = {json.dumps(ACCENTS['oxblood-noir'])}"]
+        lines += [
+            "[variant.Oxblood-Noir.palette]",
+            f"accent = {json.dumps(ACCENTS['oxblood-noir'])}",
+        ]
         self.tokens.write_text("\n".join(lines) + "\n")
 
     def run_tool(self, check=False):

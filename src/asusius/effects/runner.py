@@ -58,7 +58,8 @@ class KbdWriter:
 
     @staticmethod
     def _stored_effect(data) -> KbdEffect:
-        if not isinstance(data, dict) or set(data) != {f.name for f in dataclasses.fields(KbdEffect)}:
+        if not isinstance(data, dict) or set(data) != {
+                f.name for f in dataclasses.fields(KbdEffect)}:
             raise ValueError("invalid saved keyboard effect")
         return KbdEffect(**{**data, "colour1": tuple(data["colour1"]),
                             "colour2": tuple(data["colour2"])}).validate()
@@ -117,7 +118,8 @@ class KbdWriter:
         try:
             write_json_atomic(self.recovery_path, {
                 "version": 1, "saved": dataclasses.asdict(self.saved),
-                "saved_static": dataclasses.asdict(self.saved_static) if self.saved_static else None,
+                "saved_static": (dataclasses.asdict(self.saved_static)
+                                 if self.saved_static else None),
                 "frames": [dataclasses.asdict(value) for value in frames],
             })
         except OSError as exc:

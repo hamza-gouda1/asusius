@@ -33,7 +33,6 @@ from asusius.telemetry.fake import (
     upower_battery_history,
     upower_battery_props,
 )
-from asusius.telemetry.power_history import LocalVoltageStore
 from asusius.telemetry.upower import UpowerClient, UpowerDeviceInfo
 from asusius.ui.live import POWER_MAX_ERRORS, LiveHub
 

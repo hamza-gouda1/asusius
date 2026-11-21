@@ -20,7 +20,7 @@ try:
     gi.require_version("Gio", "2.0")
 except ValueError:
     pass
-from gi.repository import Gio
+from gi.repository import Gio  # noqa: E402
 
 TOUCHPAD_SCHEMA = "org.gnome.desktop.peripherals.touchpad"
 EXTENSION_SCHEMA = "org.gnome.shell.extensions.asusius-quick"

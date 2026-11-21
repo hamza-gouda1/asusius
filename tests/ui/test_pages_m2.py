@@ -223,7 +223,7 @@ def _chart_with(page, key: str):
     """The page chart whose lines include `key` (None when absent)."""
     for c in page.charts:
         lines = getattr(c, "lines", None)
-        if lines and any(l.key == key for l in lines):
+        if lines and any(line.key == key for line in lines):
             return c
     return None
 

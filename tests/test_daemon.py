@@ -215,8 +215,9 @@ class ServiceClientTests(Env):
         def spy(*a, **kw):  # rebrand check: no tuf-* thread names may come back
             names.append(kw.get("name"))
             return real_thread(*a, **kw)
-        popen = lambda cmd, **kw: (calls.append((cmd, kw)),
-                                   SimpleNamespace(pid=4242, stdout=io.BytesIO(b"boot\n")))[1]
+        def popen(cmd, **kw):
+            calls.append((cmd, kw))
+            return SimpleNamespace(pid=4242, stdout=io.BytesIO(b"boot\n"))
         c = DaemonClient(self.tmp / "run", run=lambda *a, **k: self.fail("no systemctl"),
                          popen=popen)
         self.assertEqual(c.status(), {"running": False})
