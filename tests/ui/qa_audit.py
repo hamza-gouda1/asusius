@@ -334,7 +334,8 @@ class Auditor:
         if isinstance(w, (Gtk.CheckButton, Gtk.Switch, Gtk.Scale, Gtk.ToggleButton, Gtk.DropDown,
                           Gtk.SpinButton)) and not is_icon_only(w) \
                 and not has_ancestor(w, Adw.SwitchRow, Adw.ComboRow, Adw.SpinRow,
-                                     Adw.EntryRow, Adw.ExpanderRow, Gtk.SpinButton, Gtk.ColorDialogButton):
+                                     Adw.EntryRow, Adw.ExpanderRow, Gtk.SpinButton,
+                                     Gtk.ColorDialogButton):
             named = (isinstance(w, (Gtk.CheckButton, Gtk.ToggleButton)) and w.get_label()) \
                 or isinstance(w, Gtk.ToggleButton) and w.get_child() is not None \
                 or a11y_label(w) or (isinstance(w, Gtk.CheckButton) and w.get_child() is not None)
@@ -545,7 +546,11 @@ def focus_order(emit, win, scope: str, root, expected) -> list:
             a.get_can_focus() for a in ancestors(w))
         row_ok = any(isinstance(a, Gtk.ListBoxRow) and a.get_focusable() and a.get_can_focus()
                      for a in ancestors(w))  # AdwSwitchRow: the row takes focus for its switch
-        if not chain and not row_ok:
+        dropdown_ok = (isinstance(w, Gtk.DropDown)
+                       and all(a.get_can_focus() for a in ancestors(w))
+                       and any(isinstance(c, Gtk.ToggleButton) and c.get_can_focus()
+                               and c.get_focusable() for c in children(w)))
+        if not chain and not row_ok and not dropdown_ok:
             emit(Finding("focus-unreachable", "fail", scope, desc(w),
                          "interactive widget cannot take keyboard focus"))
         if not has_ancestor(w, Adw.HeaderBar):  # header bars sit outside the reading order
@@ -558,8 +563,8 @@ def focus_order(emit, win, scope: str, root, expected) -> list:
             # one, except that the page scrolled (different scrolled content)
             if r[1] + r[3] < pr[1] - 8 and not r[0] > pr[0] + pr[2] + 8:
                 emit(Finding("focus-order", "warn", scope, desc(w),
-                             f"Tab reaches this after {desc(pw)} although it is {pr[1] - r[1]:.0f}px "
-                             "higher on screen"))
+                             f"Tab reaches this after {desc(pw)} although it is "
+                             f"{pr[1] - r[1]:.0f}px higher on screen"))
         prev = (w, r)
     return [w for w, _r in seq]
 

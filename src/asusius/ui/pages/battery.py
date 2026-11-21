@@ -385,21 +385,17 @@ class BatteryPage(Page):
         self.hist_head = Gtk.Box(spacing=10)
         self.hist_selector = Gtk.DropDown(model=Gtk.StringList.new([]))
         self.hist_selector.set_hexpand(True)
+        self.hist_selector.set_focusable(True)
         # an empty DropDown has nothing to select: keep it insensitive until the
         # inventory answers
         self.hist_selector.set_sensitive(False)
         a11y_name(self.hist_selector, "Battery history device")
         self.hist_selector.connect("notify::selected", self._on_hist_device)
-        # a DropDown container itself never reports focusable (GTK puts focus on its
-        # inner button), so qa_audit needs the row path: a focusable ListBoxRow
-        # ancestor, like the app's other DropDowns get from their rows
-        sel_row = Gtk.ListBoxRow(activatable=False)
-        sel_row.set_child(self.hist_selector)
-        sel_row.set_hexpand(True)
-        self.hist_head.append(sel_row)
+        self.hist_head.append(self.hist_selector)
         self.range_chips = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, homogeneous=True,
                                        min_children_per_line=1, max_children_per_line=4,
                                        column_spacing=6, row_spacing=6, hexpand=True)
+        self._chip_guard = False
         self.chip_buttons: list[Gtk.ToggleButton] = []
         for text, secs in RANGES:
             b = Gtk.ToggleButton(label=text, tooltip_text=f"Show the last {text} of history")
@@ -728,11 +724,20 @@ class BatteryPage(Page):
         self._refresh_history()
 
     def _on_range_toggled(self, b: Gtk.ToggleButton, secs: int) -> None:
+        if self._chip_guard:
+            return
         if not b.get_active():
-            return  # the previously active chip switching off
+            self._chip_guard = True
+            b.set_active(True)
+            self._chip_guard = False
+            return
+        self._chip_guard = True
         for other in self.chip_buttons:
             if other is not b and other.get_active():
                 other.set_active(False)
+        self._chip_guard = False
+        if secs == self._range_s:
+            return
         self._range_s = secs
         self._refresh_history(force=True)
 

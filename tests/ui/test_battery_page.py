@@ -671,6 +671,24 @@ class WiringTests(unittest.TestCase):
         self.assertEqual([r[1] for r in hub.requests[-3:]], [6 * 3600] * 3)
         self.assertEqual(chart.data[-1][1], 6 * 3600)
 
+    def test_clicking_active_range_chip_keeps_it_active(self):
+        hub = StubHub()
+        chart = ChartStub()
+        page = build_page(make_win(hub), chart=chart)
+        hub.responses = battery_responses()
+        page.on_power_inventory([laptop(BAT0)], "")
+        pump()
+        before = len(hub.requests)
+        active = page.chip_buttons[2]  # 24h default
+        self.assertTrue(active.get_active())
+        active.set_active(False)  # simulate clicking the active chip to deactivate
+        pump()
+        self.assertTrue(active.get_active())
+        self.assertEqual([b.get_active() for b in page.chip_buttons],
+                         [False, False, True, False])
+        self.assertEqual(page._range_s, RANGE_24H)
+        self.assertEqual(len(hub.requests), before)
+
     def test_stale_requests_are_dropped_so_only_the_latest_generation_renders(self):
         hub = StubHub()
         chart = ChartStub()

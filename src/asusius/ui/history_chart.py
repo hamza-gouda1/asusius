@@ -34,7 +34,7 @@ import math
 import time as _time
 
 import cairo
-from gi.repository import Adw, Gtk, PangoCairo
+from gi.repository import Adw, Gdk, Gtk, PangoCairo
 
 from ..telemetry.util import nice_ceiling
 from . import theme
@@ -94,10 +94,15 @@ class HistoryChart(Gtk.DrawingArea):
         self.set_hexpand(True)
         self.set_focusable(False)
         self.set_can_focus(False)
+        self.update_property([Gtk.AccessibleProperty.LABEL], ["Battery history chart"])
         self.add_css_class("chart")
         self.set_draw_func(self._draw)
         self.set_has_tooltip(True)
         self.connect("query-tooltip", self._query_tooltip)
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", self._on_key)
+        self.add_controller(keys)
+        self._kb_t: float | None = None
         self._plot_right = LEFT_PAD + 1
         self._series: dict[str, list] = {}
         self._states: list = []
@@ -130,6 +135,11 @@ class HistoryChart(Gtk.DrawingArea):
         self._series = {k: list(v or []) for k, v in (series or {}).items()}
         self._states = list(states or [])
         self._empty = not self._has_points()
+        self.set_focusable(not self._empty)
+        self.set_can_focus(not self._empty)
+        if self._empty or self._kb_t is None or not (
+                self._t_end - self._span_s <= self._kb_t <= self._t_end):
+            self._kb_t = None
         limit = max(120.0, min(7200.0, self._span_s / 10))
         self._gap_step = {k: min(_gap_step(v), limit) for k, v in self._series.items()}
         self.queue_draw()
@@ -138,7 +148,49 @@ class HistoryChart(Gtk.DrawingArea):
         """Show only this text, centred (the empty state)."""
         self._empty_text = text or ""
         self._empty = True
+        self._kb_t = None
+        self.set_focusable(False)
+        self.set_can_focus(False)
         self.queue_draw()
+
+    def _sample_times(self) -> list[float]:
+        t0 = self._t_end - self._span_s
+        return sorted({
+            float(t)
+            for key, _c, _top, _bot, _u in BANDS
+            for t, v in self._series.get(key, ())
+            if t0 <= t <= self._t_end and _finite(v)
+        })
+
+    def _on_key(self, _c, keyval, _code, _state) -> bool:
+        if self._empty:
+            return False
+        if keyval == Gdk.KEY_Escape:
+            if self._kb_t is None:
+                return False
+            self._kb_t = None
+            self.queue_draw()
+            return True
+        times = self._sample_times()
+        if not times:
+            return False
+        if keyval == Gdk.KEY_Home:
+            self._kb_t = times[0]
+        elif keyval == Gdk.KEY_End:
+            self._kb_t = times[-1]
+        elif keyval in (Gdk.KEY_Left, Gdk.KEY_Right):
+            step = -1 if keyval == Gdk.KEY_Left else 1
+            if self._kb_t is None:
+                self._kb_t = times[-1] if step < 0 else times[0]
+            else:
+                i = min(range(len(times)), key=lambda j: abs(times[j] - self._kb_t))
+                self._kb_t = times[min(len(times) - 1, max(0, i + step))]
+        else:
+            return False
+        self.queue_draw()
+        if hasattr(self, "trigger_tooltip_query"):
+            self.trigger_tooltip_query()
+        return True
 
     def _has_points(self) -> bool:
         for key, _c, _top, _bot, _u in BANDS:
@@ -165,11 +217,12 @@ class HistoryChart(Gtk.DrawingArea):
         return a, b
 
     def _query_tooltip(self, _widget, x, _y, keyboard, tooltip) -> bool:
-        if self._empty or keyboard or not LEFT_PAD <= x <= self._plot_right:
+        if self._empty:
+            return False
+        if not keyboard and not LEFT_PAD <= x <= self._plot_right:
             return False
         t0 = self._t_end - self._span_s
         width = max(1.0, self._plot_right - LEFT_PAD)
-        target = t0 + (x - LEFT_PAD) * self._span_s / width
         samples = {}
         for key, rows in self._series.items():
             for t, value in rows:
@@ -177,9 +230,14 @@ class HistoryChart(Gtk.DrawingArea):
                     samples.setdefault(t, {})[key] = value
         if not samples:
             return False
-        t = min(samples, key=lambda stamp: abs(stamp - target))
-        if abs(t - target) > self._span_s * 8 / width:
-            return False
+        if keyboard:
+            target = self._kb_t if self._kb_t is not None else max(samples)
+            t = min(samples, key=lambda stamp: abs(stamp - target))
+        else:
+            target = t0 + (x - LEFT_PAD) * self._span_s / width
+            t = min(samples, key=lambda stamp: abs(stamp - target))
+            if abs(t - target) > self._span_s * 8 / width:
+                return False
         lines = [_time.strftime("%d %b %H:%M:%S", _time.localtime(t))]
         values = samples[t]
         for key, name, unit in (("percent", "Charge", "%"), ("watts", "Power", " W"),
@@ -261,6 +319,14 @@ class HistoryChart(Gtk.DrawingArea):
             cr.set_source_rgb(*dim[:3])
             cr.move_to(x, ty)
             PangoCairo.show_layout(cr, layout)
+
+        if self._kb_t is not None and t0 <= self._kb_t <= t1:
+            kx = round(LEFT_PAD + (self._kb_t - t0) / span * (plot_r - LEFT_PAD)) + 0.5
+            cr.set_source_rgba(*dim[:3], 0.55)
+            cr.set_line_width(1)
+            cr.move_to(kx, plot_top)
+            cr.line_to(kx, bot_y)
+            cr.stroke()
 
     def _plot_band(self, cr, layout, key: str, cname: str, rng, top_lbl, bot_lbl,
                    unit: str, y: float, bh: float, t0: float, span: float,
