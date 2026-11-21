@@ -172,8 +172,8 @@ class Daemon:
                     try:
                         self.updates.tick()
                         self.updates.status(refresh=True)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        _err_log(f"asusiusd: updates tick failed: {exc!r}")
                 if now >= next_status:
                     try:
                         self.write_status()

@@ -92,10 +92,12 @@ def check() -> SourceResult:
     if not ok:
         return res
     installed: dict = {}
+    errors = []
     r = _run(["flatpak", "list", f"--columns={LIST_COLS}"])
     if r.returncode == 0:
         installed = parse_list(r.stdout)
-    errors = []
+    else:
+        errors.append(f"list: {(r.stderr or '').strip()[:160] or f'exit {r.returncode}'}")
     for inst in ("system", "user"):
         if inst == "user" and not any(k[2] == "user" for k in installed):
             continue  # no per-user installation in use
@@ -107,7 +109,7 @@ def check() -> SourceResult:
         res.items += parse_remote_ls(r.stdout, inst, installed)
     res.info["installed"] = len(installed)
     res.info["method"] = "flatpak remote-ls --cached"
-    if errors and not res.items:
+    if errors:
         res.error = "; ".join(errors)
     return res
 

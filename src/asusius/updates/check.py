@@ -11,9 +11,11 @@ child process so the package cache (tens of MB for apt) is freed when it ends.
 from __future__ import annotations
 
 import contextlib
+import errno
 import fcntl
 import json
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -65,10 +67,10 @@ def load_report(path: Path | None = None) -> Report | None:
 
 def update_cache(fn, path: Path | None = None) -> dict:
     """Locked read-modify-write of the cache document (report + notification state)."""
-    from ..automation.config import write_json_atomic
+    from ..automation.config import open_private_lock, write_json_atomic
     path = path or cache_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path.with_name(path.name + ".wlock"), "a") as lk:
+    fd = open_private_lock(path.with_name(path.name + ".wlock"))
+    with os.fdopen(fd, "r+") as lk:
         fcntl.flock(lk, fcntl.LOCK_EX)
         data = load_cache(path)
         fn(data)
@@ -80,9 +82,10 @@ def update_cache(fn, path: Path | None = None) -> dict:
 def check_lock(path: Path | None = None, wait: bool = True):
     """Yields True when this caller got the lock (should check), False when it waited for
     someone else's check (should just read the cache)."""
+    from ..automation.config import open_private_lock
     path = path or cache_dir() / "updates.lock"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a") as f:
+    fd = open_private_lock(path)
+    with os.fdopen(fd, "r+") as f:
         try:
             fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
             got = True
@@ -101,12 +104,23 @@ def check_lock(path: Path | None = None, wait: bool = True):
 def is_checking(path: Path | None = None) -> bool:
     path = path or cache_dir() / "updates.lock"
     try:
-        with open(path, "a") as f:
-            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            fcntl.flock(f, fcntl.LOCK_UN)
-            return False
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return False
     except OSError:
+        return False
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return False
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    except BlockingIOError:
         return True
+    except OSError as exc:
+        return exc.errno in (errno.EAGAIN, errno.EWOULDBLOCK)
+    finally:
+        os.close(fd)
 
 
 def _timed(name: str, fn) -> SourceResult:

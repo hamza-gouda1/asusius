@@ -44,6 +44,7 @@ class UpdateScheduler:
         self._notify_id = 0
         self._status: dict | None = None
         self._lock = threading.RLock()
+        self._notify_lock = threading.Lock()
 
     def configure(self, settings: dict) -> None:
         with self._lock:
@@ -131,7 +132,7 @@ class UpdateScheduler:
                 _t, d["notify"] = notify_mod.decide(rep, d.get("notify"))
             update_cache(mark)
             return None
-        with self._lock:
+        with self._notify_lock:
             text, _candidate = notify_mod.decide(rep, load_cache().get("notify"))
             if text is None:
                 return None

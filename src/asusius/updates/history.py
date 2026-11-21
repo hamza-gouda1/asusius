@@ -71,8 +71,10 @@ def append(run: dict, path: Path | None = None, max_bytes: int = MAX_BYTES) -> N
     with _locked(path):
         fd = _open_append(path)
         try:
+            rotated = False
             if os.fstat(fd).st_size + len(data) > max_bytes and os.fstat(fd).st_size:
                 os.replace(path, path.with_name(path.name + ".1"))
+                rotated = True
                 os.close(fd)
                 fd = _open_append(path)
             remaining = memoryview(data)
@@ -82,6 +84,13 @@ def append(run: dict, path: Path | None = None, max_bytes: int = MAX_BYTES) -> N
                     raise OSError("could not append update history")
                 remaining = remaining[written:]
             os.fsync(fd)
+            if rotated or os.fstat(fd).st_size == len(data):
+                with contextlib.suppress(OSError):
+                    dfd = os.open(path.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(dfd)
+                    finally:
+                        os.close(dfd)
         finally:
             os.close(fd)
 

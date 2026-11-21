@@ -451,6 +451,8 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(age_text(0.5, now=7200.5), "2 hours ago")
         self.assertEqual(age_text(1, now=1 + 86400), "1 day ago")
         self.assertEqual(human_size(77_619_200), "77.6 MB")
+        self.assertEqual(human_size(999_500), "1.0 MB")
+        self.assertEqual(human_size(999_950_000), "1.0 GB")
         self.assertEqual(human_size(None), "")
 
 
@@ -565,7 +567,7 @@ class SchedulerTests(FakeEnv):
         self.assertEqual(s.worker.name, "asusius-updates")
 
 
-# -- check, cache, actions, settings, CLI -----------------------------------------------------------
+# -- check, cache, actions, settings, CLI ---------------------------------------------------------
 class CheckTests(FakeEnv):
     def test_fake_report_and_cache(self):
         self.assertEqual(check.cache_dir(), self.tmp / "root" / "fake-cache")
@@ -685,10 +687,6 @@ class AgentToolTests(FakeEnv):
         self.assertIn("items[].name", res["untrusted_fields"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class DaemonIntegrationTests(unittest.TestCase):
     def test_daemon_configures_and_reports_the_scheduler(self):
         from asusius.automation.config import RUNTIME_DIR_ENV, update_config
@@ -732,3 +730,7 @@ class RebrandTests(unittest.TestCase):
                 text = path.read_text(encoding="utf-8")
                 self.assertIsNone(re.search(r"tuf", text, re.IGNORECASE),
                                   f"{path} still mentions the old brand")
+
+
+if __name__ == "__main__":
+    unittest.main()

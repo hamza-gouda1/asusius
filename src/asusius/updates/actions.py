@@ -306,7 +306,8 @@ def pk_install(names: list[str], progress: Progress | None = None,
     # PackageKit's InfoEnum INSTALLING/UPDATING, never removal/downgrade/obsoletion.
     allowed = wanted | exp_specs
     if not simulated:
-        raise ActionError("PackageKit did not provide a dependency simulation; nothing was installed")
+        raise ActionError("PackageKit did not provide a dependency simulation; "
+                          "nothing was installed")
     for info, pid, _summary in simulated:
         if info not in (12, 11) or not _pid_matches_specs(pid, allowed):
             raise ActionError("PackageKit's plan differs from the confirmed package list; "
@@ -447,8 +448,12 @@ def _fetch_lvfs(url: str, watch: object | None = None) -> bytes:
     transfer_deadline = t0 + LVFS_TRANSFER_TIMEOUT_S
     conn = _PinnedHTTPSConnection(u.hostname, addresses, timeout=LVFS_CONNECT_TIMEOUT_S,
                                   connect_deadline=t0 + LVFS_CONNECT_TIMEOUT_S)
-    conn.response_class = lambda sock, **kwargs: http.client.HTTPResponse(
-        _DeadlineResponseSocket(sock, transfer_deadline), **kwargs)
+
+    def _response(sock, **kwargs):
+        return http.client.HTTPResponse(
+            _DeadlineResponseSocket(sock, transfer_deadline), **kwargs)
+
+    conn.response_class = _response
     target = urllib.parse.urlunparse(("", "", u.path or "/", u.params, u.query, ""))
     buf = bytearray()
     try:
@@ -518,8 +523,14 @@ def fwupd_install(item: UpdateItem, progress: Progress | None = None,
         watch.phase("Installing", percent=None, cancellable=False)
     fd, cab = tempfile.mkstemp(prefix="asusius-fw-", suffix=".cab")
     try:
-        os.write(fd, data)
+        remaining = memoryview(data)
+        while remaining:
+            written = os.write(fd, remaining)
+            if written <= 0:
+                raise OSError("could not write firmware cabinet")
+            remaining = remaining[written:]
         os.fsync(fd)
+        os.lseek(fd, 0, os.SEEK_SET)
         fds = Gio.UnixFDList.new_from_array([fd])
         if progress:
             progress("installing (do not interrupt)")
@@ -783,7 +794,8 @@ def apply(items: list[UpdateItem], progress: Progress | None = None,
                                              [i.extra.get("ref") or i.name for i in its],
                                              progress=progress, watch=w, cancel=cancel)
             elif method == "fwupd":
-                out[method] = "; ".join(fwupd_install(i, progress, watch=w, cancel=cancel) for i in its)
+                out[method] = "; ".join(
+                    fwupd_install(i, progress, watch=w, cancel=cancel) for i in its)
             if w:
                 w.phase("Done", percent=100, done=True, error="")
         except _Cancelled as exc:
@@ -856,7 +868,8 @@ def apply_deps(item: UpdateItem, progress: Progress | None = None,
             from . import apt
             fresh = apt.check()
             latest = next((i for i in fresh.items if i.id == item.id), None)
-            if not fresh.available or fresh.error or latest is None or _deps_plan(latest) != confirmed:
+            if (not fresh.available or fresh.error or latest is None
+                    or _deps_plan(latest) != confirmed):
                 raise ActionError("The dependency plan changed since confirmation. Refresh "
                                   "the Updates page and confirm the new list")
         if _fake():

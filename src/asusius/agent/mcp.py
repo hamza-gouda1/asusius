@@ -54,9 +54,9 @@ SAFETY_DOC = """# Asusius agent access: safety model
   (control-basic tools only), or a per-call approval. Without one the request is queued,
   the owner sees it in the app (and a desktop notification), and you get an
   `approval_id`. Poll `get_approval_status` from the requesting session. Once approved,
-  repeat the identical call with `approval_id`. An approval is bound to the tool, the exact parameters and this
-  server session, works once, and expires. Restarting the server requires a fresh
-  approval. The client name is self-declared and informational, not authentication;
+  repeat the identical call with `approval_id`. An approval is bound to the tool, the exact
+  parameters and this server session, works once, and expires. Restarting the server
+  requires a fresh approval. The client name is self-declared and informational, not
   approval and audit records include the OS-reported parent PID and executable.
   A wrapper may be the parent. This is not a sandbox against processes running as you.
 - High-risk tools (set_fan_curve, set_gpu_mode, set_power_limit, restore_defaults) are
@@ -285,11 +285,12 @@ def _readlines(stream):
         line = stream.readline(MAX_LINE + 1)
         if not line:
             return
-        if len(line) > MAX_LINE and not line.endswith(b"\n"):
-            while True:  # discard the rest of the oversized line
-                rest = stream.readline(MAX_LINE)
-                if not rest or rest.endswith(b"\n"):
-                    break
+        if len(line) > MAX_LINE:
+            if not line.endswith(b"\n"):
+                while True:  # discard the rest of the oversized line
+                    rest = stream.readline(MAX_LINE)
+                    if not rest or rest.endswith(b"\n"):
+                        break
             yield None
             continue
         yield line
@@ -326,9 +327,20 @@ def serve(service=None, stdin=None, stdout=None) -> int:
         else:
             resp = server.handle_line(line)
         if resp is not None:
-            proto.write(json.dumps(resp, separators=(",", ":"), ensure_ascii=True).encode()
-                        + b"\n")
-            proto.flush()
+            payload = (json.dumps(resp, separators=(",", ":"), ensure_ascii=True).encode()
+                       + b"\n")
+            try:
+                view = memoryview(payload)
+                while view:
+                    written = proto.write(view)
+                    if written is None or written == len(view):
+                        break
+                    if written <= 0:
+                        raise BrokenPipeError("short write to stdout")
+                    view = view[written:]
+                proto.flush()
+            except BrokenPipeError:
+                return 0
     return 0
 
 

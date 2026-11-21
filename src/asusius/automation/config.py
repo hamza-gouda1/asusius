@@ -161,8 +161,14 @@ def prepare_private_parent(path: Path) -> None:
     directory = path.parent
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     config_base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    runtime_base = os.environ.get("XDG_RUNTIME_DIR") or f"{tempfile.gettempdir()}/asusius-{os.getuid()}"
-    app_directories = {Path(config_base) / "asusius", Path(runtime_base) / "asusius"}
+    cache_base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    runtime_base = (os.environ.get("XDG_RUNTIME_DIR")
+                    or f"{tempfile.gettempdir()}/asusius-{os.getuid()}")
+    app_directories = {
+        Path(config_base) / "asusius",
+        Path(cache_base) / "asusius",
+        Path(runtime_base) / "asusius",
+    }
     fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
         if directory in app_directories:
