@@ -37,7 +37,13 @@ class Power:
     def sample(self, now: float, vals: dict, info: dict) -> None:
         out = {"present": bool(self.batteries)}
         online = [read_int(os.path.join(a, "online")) for a in self.adapters]
-        out["ac_online"] = any(o == 1 for o in online) if online else None
+        known = [o for o in online if o in (0, 1)]
+        if 1 in known:
+            out["ac_online"] = True
+        elif known and len(known) == len(online):
+            out["ac_online"] = False
+        else:
+            out["ac_online"] = None
         if not self.batteries:
             info["battery"] = out
             return

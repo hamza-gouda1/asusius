@@ -37,10 +37,10 @@ def parse_pid_stat(data: bytes) -> tuple | None:
     Indices 0-7 feed the walker, kill and alive; st[8] is the nice value (field 19).
     None when the comm parens or the required fields are missing."""
     r = data.rfind(b")")
-    l = data.find(b"(")
-    if not 0 <= l < r:
+    left = data.find(b"(")
+    if not 0 <= left < r:
         return None
-    comm = data[l + 1:r].decode(errors="replace")
+    comm = data[left + 1:r].decode(errors="replace")
     f = data[r + 2:].split()
     if len(f) < 22:
         return None
@@ -55,10 +55,13 @@ def parse_io(data: bytes) -> tuple[int, int] | None:
     """(read_bytes, write_bytes) at the storage layer from /proc/pid/io."""
     r = w = None
     for line in data.split(b"\n"):
-        if line.startswith(b"read_bytes:"):
-            r = int(line[11:])
-        elif line.startswith(b"write_bytes:"):
-            w = int(line[12:])
+        try:
+            if line.startswith(b"read_bytes:"):
+                r = int(line[11:])
+            elif line.startswith(b"write_bytes:"):
+                w = int(line[12:])
+        except ValueError:
+            return None
     return None if r is None or w is None else (r, w)
 
 
@@ -76,7 +79,9 @@ def parse_vmswap(data: bytes) -> int | None:
 
 
 def unescape_unit(s: str) -> str:
-    return re.sub(r"\\x([0-9a-fA-F]{2})", lambda m: chr(int(m.group(1), 16)), s)
+    raw = s.encode("utf-8", errors="surrogateescape")
+    raw = re.sub(rb"\\x([0-9a-fA-F]{2})", lambda m: bytes([int(m.group(1), 16)]), raw)
+    return raw.decode("utf-8", errors="replace")
 
 
 def app_from_cgroup(text: str) -> tuple[str | None, str | None]:
@@ -193,9 +198,14 @@ class ProcessWalker:
             dt = now - p._t
             p._ticks = ticks
             sm = read_bytes(base + "/statm", 256)
+            resident = shared = None
             if sm:
                 f = sm.split()
-                resident, shared = int(f[1]), int(f[2])
+                try:
+                    resident, shared = int(f[1]), int(f[2])
+                except (IndexError, ValueError):
+                    resident = shared = None
+            if resident is not None and shared is not None:
                 p.rss = resident * PAGE
                 p.mem = max(0, resident - shared) * PAGE
                 p.mem_partial = False

@@ -26,7 +26,10 @@ def parse_net_dev(data: bytes) -> dict[str, tuple[int, int, int, int]]:
         p = rest.split()
         if len(p) < 10:
             continue
-        out[name.strip().decode()] = (int(p[0]), int(p[1]), int(p[8]), int(p[9]))
+        try:
+            out[name.strip().decode()] = (int(p[0]), int(p[1]), int(p[8]), int(p[9]))
+        except (ValueError, IndexError, UnicodeDecodeError):
+            continue
     return out
 
 

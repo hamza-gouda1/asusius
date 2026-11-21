@@ -19,8 +19,11 @@ def parse_diskstats(data: bytes) -> dict[str, tuple[int, ...]]:
         p = line.split()
         if len(p) < 13:
             continue
-        out[p[2].decode()] = (int(p[3]), int(p[5]), int(p[7]), int(p[9]),
-                              int(p[12]), int(p[6]), int(p[10]))
+        try:
+            out[p[2].decode()] = (int(p[3]), int(p[5]), int(p[7]), int(p[9]),
+                                  int(p[12]), int(p[6]), int(p[10]))
+        except (ValueError, IndexError, UnicodeDecodeError):
+            continue
     return out
 
 

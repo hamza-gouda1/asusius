@@ -35,7 +35,8 @@ def pci_name(vendor: str, device: str) -> str | None:
                 elif in_vendor and line[1] != "\t" and line[1:5] == device:
                     name = line[5:].strip()
                     break
-        break
+        if name is not None:
+            break
     _names[key] = name
     return name
 

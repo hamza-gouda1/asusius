@@ -64,7 +64,7 @@ class Sensors:
         self.fan_paths: list[tuple[str, str]] = []  # (label, path)
         self.nvme: dict[str, list[tuple[str, str]]] = {}  # disk -> [(label, path)]
         self.extra: list[tuple[str, str, str]] = []  # (key, label, path): acpitz, dimm
-        self._rapl_prev: tuple[float, int] | None = None
+        self._rapl_prev: tuple[int, float] | None = None
         self._slow_t = -1e9
         self._slow: dict[str, float | None] = {}
         rapl = join(root, "sys/class/powercap/intel-rapl:0")
@@ -116,14 +116,21 @@ class Sensors:
                 break
         self.nvme = {}
         for hw in self.hw.by_name.get("nvme", []):
-            dev = os.path.basename(os.path.realpath(os.path.join(hw, "device")))
+            dev_link = os.path.join(hw, "device")
+            ndir = os.path.realpath(dev_link)
+            dev = os.path.basename(ndir)
             disk = None
-            ndir = os.path.join(os.path.realpath(os.path.join(hw, "device")))
             for d in listdir(ndir):  # nvme0 -> nvme0n1
                 if re.fullmatch(r"nvme\d+n\d+", d):
                     disk = d
                     break
-            disk = disk or (dev + "n1" if dev.startswith("nvme") else dev)
+            if disk is None:
+                if dev.startswith("nvme"):
+                    disk = dev + "n1"
+                elif os.path.islink(dev_link) and dev != "device":
+                    disk = dev
+                else:
+                    disk = os.path.basename(hw)
             self.nvme[disk] = [(lab or f"temp{n}", path) for n, path, lab in channels(hw, "temp")]
         self.extra = []
         hw = self.hw.first("acpitz")
@@ -137,13 +144,49 @@ class Sensors:
             if ch:
                 self.extra.append((f"dimm{i}", f"Memory module {i + 1}", ch[0][1]))
 
+    @staticmethod
+    def _fan_slug(label: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_") or "fan"
+
     def fan_key(self, label: str) -> str:
         lab = label.lower()
         if "cpu" in lab:
             return "cpu"
         if "gpu" in lab:
             return "gpu"
-        return re.sub(r"[^a-z0-9]+", "_", lab).strip("_") or "fan"
+        return self._fan_slug(label)
+
+    def _assign_fan_keys(self, fan_paths: list[tuple[str, str]]) -> list[tuple[str, str, str]]:
+        """Assign unique telemetry keys while reserving 'cpu'/'gpu' for primary fans."""
+        primary = {
+            "cpu": {"cpu", "cpu_fan", "fan_cpu"},
+            "gpu": {"gpu", "gpu_fan", "fan_gpu"},
+        }
+        keys: list[str | None] = [None] * len(fan_paths)
+        used: set[str] = set()
+        for i, (lab, _path) in enumerate(fan_paths):
+            slug = self._fan_slug(lab)
+            for role, names in primary.items():
+                if role not in used and slug in names:
+                    keys[i] = role
+                    used.add(role)
+                    break
+        for i, (lab, _path) in enumerate(fan_paths):
+            if keys[i] is not None:
+                continue
+            cand = self.fan_key(lab)
+            slug = self._fan_slug(lab)
+            if cand in used:
+                if slug not in used and slug not in primary.get(cand, ()):
+                    cand = slug
+                else:
+                    n = 2
+                    while f"{cand}_{n}" in used:
+                        n += 1
+                    cand = f"{cand}_{n}"
+            keys[i] = cand
+            used.add(cand)
+        return [(keys[i] or "fan", lab, path) for i, (lab, path) in enumerate(fan_paths)]
 
     def sample(self, now: float, vals: dict, info: dict) -> None:
         self._layout(now)
@@ -154,8 +197,7 @@ class Sensors:
         for core, path in self.core_paths.items():
             v = read_int(path)
             vals[f"temp.core.{core}"] = None if v is None else v / 1000
-        for lab, path in self.fan_paths:
-            key = self.fan_key(lab)
+        for key, lab, path in self._assign_fan_keys(self.fan_paths):
             v = read_int(path)
             vals[f"fan.{key}"] = v
             out["fans"].append((key, lab))
@@ -187,9 +229,9 @@ class Sensors:
             if e is None:
                 self.rapl_reason = RAPL_ROOT_ONLY
             else:
-                prev, self._rapl_prev = self._rapl_prev, (now, e)
+                prev, self._rapl_prev = self._rapl_prev, (e, now)
                 if prev is not None:
-                    watts = powercap_watts(prev[1], e, now - prev[0], self.rapl_range)
+                    watts = powercap_watts(prev[0], e, now - prev[1], self.rapl_range)
                     if watts is not None:
                         vals["power.cpu"] = watts
         out["rapl_reason"] = self.rapl_reason

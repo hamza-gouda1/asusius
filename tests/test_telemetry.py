@@ -17,6 +17,7 @@ from asusius.telemetry.memory import (PSI_MISSING, MemoryReader, derive, parse_m
                                       parse_mm_stat, parse_psi)
 from asusius.telemetry.network import parse_net_dev, parse_wireless
 from asusius.telemetry.procs import app_from_cgroup, parse_io, parse_pid_stat
+from asusius.telemetry.sensors import Sensors
 from asusius.telemetry.storage import disk_rates, parse_diskstats, parse_mounts
 from asusius.telemetry.util import nice_ceiling, rate
 
@@ -494,8 +495,11 @@ class GpuTests(unittest.TestCase):
             class Boom:
                 def __getattr__(self, name):
                     raise AssertionError(f"NVML {name} called on a sleeping GPU")
+            def _noop():
+                return None
+
             g.nvml, g.backend = Boom(), "nvml"
-            g.release = lambda: None
+            g.release = _noop
             vals, info = {}, {}
             g.sample(1.0, vals, info)
             self.assertEqual(info["dgpu"]["state"], "sleeping")
@@ -530,7 +534,11 @@ class GpuTests(unittest.TestCase):
             (root / "fake/nvml.json").write_text(
                 '{"query": {"util": 0, "mem_util": 0, "temp": 40}, "procs": {}}')
             released = []
-            g.release = lambda: released.append(1)
+
+            def _mark_released():
+                released.append(1)
+
+            g.release = _mark_released
             for i in range(3):
                 info = {}
                 g.sample(float(i), {}, info)
@@ -644,6 +652,76 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(fmt.duration(90061), "1 d 1 h 1 min")
         self.assertEqual(fmt.num(float("nan")), "–")
         self.assertEqual(fmt.axis_rate(2e6), "2 MB/s")
+
+    def test_rounding_boundaries_promote_cleanly(self):
+        self.assertEqual(fmt.bytes_(1023.6), "1.0 KiB")
+        self.assertEqual(fmt.bytes_(1024 * 1024 - 1), "1.0 MiB")
+        self.assertEqual(fmt.bytes_((1 << 30) - 1), "1.0 GiB")
+        self.assertEqual(fmt.rate(999.6), "1.0 kB/s")
+        self.assertEqual(fmt.rate(999_990), "1.0 MB/s")
+        self.assertEqual(fmt.bits(124_999), "1.0 Mbit/s")
+        self.assertEqual(fmt.mhz(999.6), "1.00 GHz")
+        self.assertEqual(fmt.count(9999.6), "10 k")
+        self.assertEqual(fmt.count(999_600), "1.0 M")
+        self.assertEqual(fmt.hours(0), "0 min")
+        self.assertEqual(fmt.hours(0.001), "0 min")
+        self.assertEqual(fmt.hours(0.5), "30 min")
+        self.assertEqual(fmt.hours(1.4), "1 h 24 min")
+        self.assertEqual(fmt.hours(-1), "–")
+
+    def test_sticky_bytes_hysteresis_prevents_boundary_churn(self):
+        mib = 1 << 20
+        sticky = fmt.sticky_bytes()
+        self.assertEqual(sticky(1008 * mib), "1008.0 MiB")
+        self.assertEqual(sticky(1029 * mib), "1.0 GiB")
+        # Oscillating just below 1 GiB stays in GiB instead of churning back to MiB.
+        for sample in (1008 * mib, 1034 * mib, 1024 * mib, 1015.8 * mib, 1044 * mib):
+            self.assertEqual(sticky(sample), "1.0 GiB")
+        # Brief NaN gap preserves unit state.
+        self.assertEqual(sticky(float("nan")), "–")
+        self.assertEqual(sticky(1015 * mib), "1.0 GiB")
+        # Dropping well below 1 GiB / 1.25 demotes cleanly back to MiB, and 0 -> 0 B.
+        self.assertEqual(sticky(800 * mib), "800.0 MiB")
+        self.assertEqual(sticky(0), "0 B")
+
+
+class SensorsFanKeyTests(unittest.TestCase):
+    def _sample_fans(self, specs):
+        with tempfile.TemporaryDirectory() as d:
+            hw = Path(d) / "sys/class/hwmon/hwmon0"
+            hw.mkdir(parents=True)
+            (hw / "name").write_text("asus-ec-sensors\n")
+            for idx, (label, rpm) in enumerate(specs, 1):
+                (hw / f"fan{idx}_label").write_text(f"{label}\n")
+                (hw / f"fan{idx}_input").write_text(f"{rpm}\n")
+            vals, info = {}, {}
+            Sensors(d).sample(1.0, vals, info)
+            return vals, info["sensors"]["fans"]
+
+    def test_distinct_keys_for_cpu_opt_and_gpu_fans(self):
+        vals, fans = self._sample_fans([
+            ("CPU Fan", 2100),
+            ("CPU Opt", 1500),
+            ("GPU Fan", 2400),
+            ("GPU 2", 2500),
+        ])
+        self.assertEqual(vals["fan.cpu"], 2100)
+        self.assertEqual(vals["fan.cpu_opt"], 1500)
+        self.assertEqual(vals["fan.gpu"], 2400)
+        self.assertEqual(vals["fan.gpu_2"], 2500)
+        self.assertEqual([k for k, _ in fans], ["cpu", "cpu_opt", "gpu", "gpu_2"])
+
+    def test_primary_cpu_fan_wins_cpu_key_regardless_of_order(self):
+        vals, fans = self._sample_fans([("CPU Opt", 1500), ("CPU Fan", 2100)])
+        self.assertEqual(vals["fan.cpu"], 2100)
+        self.assertEqual(vals["fan.cpu_opt"], 1500)
+        self.assertEqual(fans, [("cpu_opt", "CPU Opt"), ("cpu", "CPU Fan")])
+
+    def test_identical_fan_labels_get_numbered_suffix(self):
+        vals, fans = self._sample_fans([("CPU Fan", 2100), ("CPU Fan", 1800)])
+        self.assertEqual(vals["fan.cpu"], 2100)
+        self.assertEqual(vals["fan.cpu_2"], 1800)
+        self.assertEqual([k for k, _ in fans], ["cpu", "cpu_2"])
 
 
 if __name__ == "__main__":

@@ -75,8 +75,9 @@ def normalize_history(points: Any, series: str = "charge") -> list[HistoryPoint]
                 watts = abs(watts)
             elif watts != 0 and state not in (None, "unknown"):
                 watts = None
+        pct_val = percent if percent is None or 0 <= percent <= 100 else None
         rows.append(HistoryPoint(t=t,
-                                 percent=percent if percent is None or 0 <= percent <= 100 else None,
+                                 percent=pct_val,
                                  watts=watts,
                                  voltage=voltage if voltage is None or voltage > 0 else None,
                                  state=state if isinstance(state, str) else None))
@@ -243,6 +244,12 @@ def _write_json(path: Path, rows: list[dict]) -> bool:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
+        with contextlib.suppress(OSError):
+            dfd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(dfd)
+            finally:
+                os.close(dfd)
     except OSError:
         if tmp is not None:
             with contextlib.suppress(OSError):

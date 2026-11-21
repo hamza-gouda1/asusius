@@ -156,10 +156,12 @@ def _nested_mounts(root: str) -> set[str]:
     try:
         with open("/proc/self/mountinfo", encoding="utf-8", errors="surrogateescape") as stream:
             for line in stream:
-                fields = line.split()
+                fields = line.rstrip("\n").split(" ")
                 if len(fields) < 6:
                     continue
-                mount = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m[1], 8)), fields[4])
+                raw = fields[4].encode("utf-8", errors="surrogateescape")
+                raw = re.sub(rb"\\([0-7]{3})", lambda m: bytes([int(m[1], 8)]), raw)
+                mount = raw.decode("utf-8", errors="surrogateescape")
                 if mount != root and mount.startswith(prefix):
                     points.add(mount)
     except OSError:
@@ -206,7 +208,8 @@ class DirNode:
 class ScanResult:
     """Immutable scan output: flat list of DirNodes plus totals, stats and error."""
 
-    __slots__ = ("root_path", "nodes", "root", "totals", "stats", "error", "_hogs", "_apparent_hogs")
+    __slots__ = ("root_path", "nodes", "root", "totals", "stats", "error",
+                 "_hogs", "_apparent_hogs")
 
     def __init__(self, root_path: str, nodes: list[DirNode], root: int,
                  totals: dict, stats: dict, error: str | None = None, *,
@@ -240,7 +243,8 @@ class ScanResult:
             return self.root_path
         return os.path.join(self.root_path, *reversed(parts))
 
-    def top_hogs(self, limit: int = 10, *, use_apparent: bool = False) -> list[tuple[str, int, str]]:
+    def top_hogs(self, limit: int = 10, *,
+                 use_apparent: bool = False) -> list[tuple[str, int, str]]:
         """Return up to MAX_HOGS largest files in the requested size metric."""
         heap = self._apparent_hogs if use_apparent else self._hogs
         best = heapq.nlargest(limit, heap)
@@ -382,7 +386,8 @@ def scan_path(root_path: str, cancel_event: threading.Event | None = None,
         for name in sorted(children):
             child_path, child_stat = children[name]
             cidx = len(nodes)
-            nodes.append(DirNode(name, idx, child_stat.st_mtime, (child_stat.st_dev, child_stat.st_ino)))
+            nodes.append(DirNode(name, idx, child_stat.st_mtime,
+                                 (child_stat.st_dev, child_stat.st_ino)))
             to_push.append((cidx, child_path))
         node.child_dir_indices = tuple(cidx for cidx, _ in to_push)
         stack.extend(reversed(to_push))

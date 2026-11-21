@@ -160,8 +160,11 @@ class CpuReader:
         self.want_policy = False
         self._policy_at = float("-inf")
         self._policy = None
+        self._gov_at = float("-inf")
+        self._governor: str | None = None
         self.static = self._static()
         sysd = join(root, "sys/devices/system/cpu")
+        self._gov_path = os.path.join(sysd, "cpu0/cpufreq/scaling_governor")
         self._freq_paths = [os.path.join(sysd, f"cpu{i}/cpufreq/scaling_cur_freq")
                             for i in self.static["cpus"]]
 
@@ -279,9 +282,15 @@ class CpuReader:
             if self._policy is None or now - self._policy_at >= 5:
                 self._policy = self.policy()
                 self._policy_at = now
+                self._governor = self._policy.get("governor")
+                self._gov_at = now
             out["policy"] = self._policy
         else:
             self._policy = None
+            if now - self._gov_at >= 5:
+                self._governor = read_str(self._gov_path)
+                self._gov_at = now
+        out["governor"] = self._governor
         # the per-tick info dict is rebuilt each tick, so the static cache topology is
         # republished here every tick (a static-only field never reaches the pages)
         out["caches"] = self.static.get("caches") or {}

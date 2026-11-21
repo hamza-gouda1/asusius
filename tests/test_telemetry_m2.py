@@ -541,8 +541,11 @@ class LinkTests(unittest.TestCase):
             def link_boom(path):
                 raise AssertionError(f"link attribute read on a sleeping GPU: {path}")
 
+            def _noop():
+                return None
+
             g.nvml, g.backend = Boom(), "nvml"
-            g.release = lambda: None
+            g.release = _noop
             with patch.object(pci_mod, "read_str", side_effect=pci_guard) as pci_reads, \
                     patch.object(intel_mod, "read_str", side_effect=link_boom) as link_reads:
                 vals, info = {}, {}

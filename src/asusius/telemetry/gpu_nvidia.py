@@ -22,6 +22,7 @@ IDLE_BACKOFF_S = 30.0  # then one check per this long while it stays awake and i
 SMI_EVERY_S = 5.0  # nvidia-smi fallback rate limit
 NVML_OK, NVML_NOT_SUPPORTED, NVML_INSUFFICIENT_SIZE = 0, 3, 7
 CLOCK_GRAPHICS, CLOCK_SM, CLOCK_MEM, CLOCK_VIDEO = 0, 1, 2, 3
+_RATE_LIMITED = object()
 
 
 class _Util(ctypes.Structure):
@@ -294,9 +295,9 @@ class NvidiaGpu:
         self.procs = nv.processes(self.handle)
         return q
 
-    def _query_smi(self, now: float) -> dict | None:
+    def _query_smi(self, now: float) -> dict | object | None:
         if now - self._smi_t < SMI_EVERY_S:
-            return None  # rate limited: keep the previous reading, no new sample
+            return _RATE_LIMITED  # rate limited: keep the previous reading, no new sample
         self._smi_t = now
         from ..backends.util import run_cmd
         try:
@@ -306,6 +307,8 @@ class NvidiaGpu:
             self.reason = f"nvidia-smi failed: {exc}"
             return None
         q = parse_smi(out.splitlines()[0]) if out.strip() else {}
+        if q:
+            self.reason = None
         if q and not self.static:
             self.static = {"name": q.get("name"), "driver_version": q.get("driver_version")}
         self.procs = {}
@@ -362,12 +365,14 @@ class NvidiaGpu:
             out["static"] = self.static
             info["dgpu"] = out
             return
+        held = False
         if self.backend == "nvml":
             q = self._query_nvml(now)
         elif self.backend == "nvidia-smi":
             q = self._query_smi(now)
-            if q is None and self._smi_last:
-                out.update(self._smi_last)
+            if q is _RATE_LIMITED:
+                q = self._smi_last.get("q") if self._smi_last else None
+                held = q is not None
         else:
             q = self._query_fake()
         if q:
@@ -382,23 +387,27 @@ class NvidiaGpu:
                 if q.get(engine) is not None:
                     vals[f"dgpu.{engine}"] = q[engine]
             out["q"] = q
-            self.last_q, self.last_q_t = q, now
-            if self.backend == "nvidia-smi":
-                self._smi_last = {"q": q}
-            busy = (q.get("util") or 0) >= 1 or (q.get("mem_util") or 0) >= 5 or \
-                any("C" in p["type"] for p in self.procs.values())
-            self._idle = 0 if busy else self._idle + 1
-            if self._idle >= IDLE_SAMPLES:
-                self.release()
-                self._idle = 0
-                self._hold_until = now + IDLE_BACKOFF_S
-                out["released"] = True
-            elif runtime_state(self.dev["dir"])[0] in ("active", "unsupported"):
-                # Link attributes may access PCI config space. Only read after a
-                # successful sample and never while the poller is backing off.
-                link, self._link_max = pcie_link(self.dev["dir"], self._link_max)
-                if link:
-                    out["link"] = link
+            if not held:
+                self.last_q, self.last_q_t = q, now
+                if self.backend == "nvidia-smi":
+                    self._smi_last = {"q": q}
+                util = q.get("util")
+                mem_util = q.get("mem_util")
+                has_util = util is not None or mem_util is not None
+                busy = (not has_util or (util or 0) >= 1 or (mem_util or 0) >= 5
+                        or any("C" in p["type"] for p in self.procs.values()))
+                self._idle = 0 if busy else self._idle + 1
+                if self._idle >= IDLE_SAMPLES:
+                    self.release()
+                    self._idle = 0
+                    self._hold_until = now + IDLE_BACKOFF_S
+                    out["released"] = True
+                elif runtime_state(self.dev["dir"])[0] in ("active", "unsupported"):
+                    # Link attributes may access PCI config space. Only read after a
+                    # successful sample and never while the poller is backing off.
+                    link, self._link_max = pcie_link(self.dev["dir"], self._link_max)
+                    if link:
+                        out["link"] = link
         out["state"] = "awake"
         out["static"] = self.static
         out["procs"] = self.procs

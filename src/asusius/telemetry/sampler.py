@@ -38,9 +38,12 @@ class Sampler:
         igpu_pdev = intel.pdev
         if intel.card is not None:
             self.igpu = intel
-        elif amd_cards and (nv.dev is not None or any(c["boot_vga"] for c in amd_cards)
-                            or len(amd_cards) == 1):
-            ig_card = next((c for c in amd_cards if c["boot_vga"]), amd_cards[0])
+        elif amd_cards:
+            ig_card = min(
+                amd_cards,
+                key=lambda c: (not c["boot_vga"],
+                               c["vram_total"] if c.get("vram_total") is not None else 1 << 60),
+            )
             self.igpu = AmdGpu(root, card_info=ig_card)
             igpu_pdev = ig_card["pdev"]
         else:
