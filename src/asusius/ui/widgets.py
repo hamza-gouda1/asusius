@@ -282,8 +282,6 @@ class KeyboardPreview(Gtk.DrawingArea):
     redrawn from one ~15 fps timer (10 when frames are slow) that exists only while the
     widget is mapped, brightness is nonzero, and the window is visible."""
 
-    COLS, ROWS = 15, 6
-
     def __init__(self) -> None:
         super().__init__()
         self.effect = KbdEffect(0)
@@ -441,7 +439,8 @@ class KeyboardPreview(Gtk.DrawingArea):
             elif tag in _WASD_TAGS:
                 cr.set_source_rgb(0.14 + col[0] * 0.62, 0.13 + col[1] * 0.62, 0.14 + col[2] * 0.62)
             else:
-                cr.set_source_rgb(0.10 + col[0] * 0.50, 0.088 + col[1] * 0.50, 0.095 + col[2] * 0.50)
+                cr.set_source_rgb(0.10 + col[0] * 0.50, 0.088 + col[1] * 0.50,
+                                  0.095 + col[2] * 0.50)
             cr.fill_preserve()
             cr.set_line_width(1.1 if tag in _WASD_TAGS else 0.9)
             if glow > 0.03:

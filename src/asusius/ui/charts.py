@@ -15,6 +15,7 @@ from gi.repository import Gtk, Pango, PangoCairo
 
 from . import theme
 from .chartmath import axis_span, bezier_controls, segments, window_points
+from .viewmodels import temp_value
 
 NAN = math.nan
 
@@ -133,6 +134,12 @@ class Chart(Gtk.DrawingArea):
         """Draw a 1 px inspect cursor with per-line dot markers at `ts` (None clears)."""
         if self.cursor_ts != ts:
             self.cursor_ts = ts
+            self.queue_draw()
+
+    def set_window(self, window_s: float) -> None:
+        if window_s != self.window_s:
+            self.window_s = window_s
+            self._seen = None
             self.queue_draw()
 
     def ts_at_x(self, x: float) -> float | None:
@@ -289,10 +296,7 @@ class Chart(Gtk.DrawingArea):
         cr.rectangle(gl, gt - 2, pw + 1, ph + 4)
         cr.clip()
         order = list(range(len(self.lines)))
-        if self.stacked:
-            order.reverse()
-        else:
-            order.reverse()
+        order.reverse()
         base_y = px_y(max(ymin, 0.0)) if ymin < 0 < ymax else gt + ph
         for li in order:
             line = self.lines[li]
@@ -358,7 +362,7 @@ class Chart(Gtk.DrawingArea):
         if self.cursor_ts is not None and now is not None:
             self._draw_cursor(cr, store, gl, gt, pw, ph, t0, px_y, interval, pal)
         if self.hover_x is not None and not self.compact and now is not None:
-            self._draw_hover(cr, layout, store, gl, gt, pw, ph, t0, px_y, pal, interval)
+            self._draw_hover(cr, layout, store, gl, gt, pw, ph, w, t0, px_y, pal, interval)
 
     def _draw_cursor(self, cr, store, gl, gt, pw, ph, t0, px_y, interval, pal):
         """The page's inspect cursor: a 1 px vertical line plus a dot per line."""
@@ -384,7 +388,7 @@ class Chart(Gtk.DrawingArea):
             cr.arc(x, px_y(val), 2.8, 0, 2 * math.pi)
             cr.fill()
 
-    def _draw_hover(self, cr, layout, store, gl, gt, pw, ph, t0, px_y, pal, interval):
+    def _draw_hover(self, cr, layout, store, gl, gt, pw, ph, w, t0, px_y, pal, interval):
         x = min(max(self.hover_x, gl), gl + pw)
         t = t0 + (x - gl) / pw * self.window_s
         # nearest sample
@@ -413,6 +417,7 @@ class Chart(Gtk.DrawingArea):
         layout.set_text("\n".join(rows), -1)
         tw, th = layout.get_pixel_size()
         bx = sx + 10 if sx + 10 + tw + 12 < gl + pw else sx - tw - 22
+        bx = max(2.0, min(bx, w - (tw + 12) - 2.0))
         by = gt + 4
         _round_rect(cr, bx, by, tw + 12, th + 8, 6)
         cr.set_source_rgba(*((0.12, 0.08, 0.09, 0.92) if theme.is_dark() else
@@ -550,40 +555,9 @@ class CoreGrid(Gtk.DrawingArea):
             core = t.get("core_id")
             tc = store.last(f"temp.core.{core}") if core is not None else None
             lay.set_font_description(small)
-            sub = (f"{f / 1000:.2f} GHz" if f else "–") + (f" · {tc:.0f}°" if tc else "")
+            sub = (f"{f / 1000:.2f} GHz" if f else "–") + (
+                f" · {temp_value(tc)}°" if tc is not None else "")
             _text(cr, lay, sub, x0 + cw - 9, y0 + 24, pal["dim"], "right")
-
-
-class CompositionBar(Gtk.DrawingArea):
-    """A horizontal 100 % bar split into coloured parts: [(fraction, colour name)]."""
-
-    def __init__(self, height: int = 14) -> None:
-        super().__init__()
-        self.parts: list[tuple[float, str]] = []
-        self.set_content_height(height)
-        self.set_hexpand(True)
-        self.set_draw_func(self._draw)
-
-    def set_parts(self, parts: list[tuple[float, str]]) -> None:
-        self.parts = parts
-        self.queue_draw()
-
-    def _draw(self, _a, cr, w, h):
-        pal = theme.colours()
-        _round_rect(cr, 0, 0, w, h, h / 2)
-        cr.set_source_rgba(*pal["grid"][:3], 0.12)
-        cr.fill_preserve()
-        cr.clip()
-        x = 0.0
-        for frac, name in self.parts:
-            if frac <= 0:
-                continue
-            ww = frac * w
-            cr.rectangle(x, 0, ww, h)
-            rgb = colour(name)
-            cr.set_source_rgba(*rgb, 0.9)
-            cr.fill()
-            x += ww
 
 
 class Meter(Gtk.DrawingArea):

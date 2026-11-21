@@ -100,6 +100,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.current: str | None = None
         self._trim_id: int | None = None
         self._park_ids: dict[str, int] = {}
+        self._parked_state: dict[str, dict] = {}
         self._reveal_id: int | None = None
         self._updates_checking = False
         self._hw_sig: tuple | None = None
@@ -140,6 +141,7 @@ class MainWindow(Adw.ApplicationWindow):
         self.list.connect("row-activated", lambda *_: self.split.set_show_content(True))
         side_tv = Adw.ToolbarView()
         side_head = Adw.HeaderBar()
+        side_head.add_css_class("main-headerbar")
         brand = Gtk.Box(spacing=8, halign=Gtk.Align.CENTER)
         brand.add_css_class("sidebar-brand")
         logo = Gtk.Image.new_from_icon_name(app.get_application_id())
@@ -160,12 +162,14 @@ class MainWindow(Adw.ApplicationWindow):
 
         # content
         # not homogeneous: a hidden page must not set the window's minimum width
-        self.stack = Gtk.Stack(css_classes=["content-area"], transition_type=Gtk.StackTransitionType.CROSSFADE,
+        self.stack = Gtk.Stack(css_classes=["content-area"],
+                               transition_type=Gtk.StackTransitionType.CROSSFADE,
                                transition_duration=140, hhomogeneous=False,
                                vhomogeneous=False)
         self.pages = LazyPages(self)
         self.content_tv = Adw.ToolbarView()
         head = Adw.HeaderBar()
+        head.add_css_class("main-headerbar")
         self.title = Adw.WindowTitle(title="Dashboard")
         head.set_title_widget(self.title)
         self._install_window_actions()
@@ -233,6 +237,11 @@ class MainWindow(Adw.ApplicationWindow):
             self.responsive(page.fit_width)
             if self.profile is not None:
                 page.on_profile(self.profile)
+        if key in self._parked_state:
+            state = self._parked_state.pop(key)
+            restore_state = getattr(page, "restore_state", None)
+            if callable(restore_state):
+                restore_state(state)
         return page
 
     def level(self) -> int:
@@ -259,6 +268,14 @@ class MainWindow(Adw.ApplicationWindow):
         self._park_ids.pop(key, None)
         page = self.pages.get_built(key)
         if page is not None and key != self.current:
+            can_park = getattr(page, "can_park", None)
+            if callable(can_park) and not can_park():
+                return GLib.SOURCE_REMOVE
+            save_state = getattr(page, "save_state", None)
+            if callable(save_state):
+                state = save_state()
+                if state:
+                    self._parked_state[key] = state
             self.responders = [f for f in self.responders if getattr(
                 f, "__self__", None) is not page]
             self.stack.remove(page)
@@ -305,14 +322,19 @@ class MainWindow(Adw.ApplicationWindow):
             if getattr(old, "is_monitor_page", False) and old.key != "dashboard":
                 self._schedule_park(old.key)
             self._schedule_trim(2)
+        old_park = self._park_ids.pop(row.key, None)
+        if old_park is not None:
+            GLib.source_remove(old_park)
         self.current = row.key
         if self._reveal_id is not None:
             GLib.source_remove(self._reveal_id)
         self._reveal_id = GLib.idle_add(self._reveal_row, row)
         self.stack.set_visible_child_name(row.key)
-        self.title.set_title(page.title)
-        self.title.set_tooltip_text(page.title)
-        self.content_page.set_title(page.title)
+        row_lbl = self._row_titles.get(row.key)
+        hdr_title = (row_lbl.get_label() if row_lbl is not None else "") or page.title
+        self.title.set_title(hdr_title)
+        self.title.set_tooltip_text(hdr_title)
+        self.content_page.set_title(hdr_title)
         live = getattr(page, "is_monitor_page", False)
         self.hub.set_interval(getattr(page, "rate_s", 1.0) if live else 1.0)
         if self.caps is not None or live:
@@ -427,7 +449,8 @@ class MainWindow(Adw.ApplicationWindow):
     def set_updates_count(self, n: int | None) -> None:
         self.updates_badge.set_label(str(n) if n else "")
         self.updates_badge.set_visible(bool(n))
-        self.updates_badge.set_tooltip_text(f"{n} updates available" if n else None)
+        self.updates_badge.set_tooltip_text(
+            f"{n} update{'s' if n != 1 else ''} available" if n else None)
 
     def _poll_updates_badge(self) -> None:
         """stat() the update cache off-thread (written by asusiusd or Updates) and update badge."""
@@ -479,6 +502,13 @@ class MainWindow(Adw.ApplicationWindow):
         if "dgpu" in self._row_titles:
             self._row_titles["dgpu"].set_label(dg_title)
             self.rows["dgpu"].set_visible(dg_present or self.current == "dgpu")
+        if self.current in ("igpu", "dgpu"):
+            row_lbl = self._row_titles.get(self.current)
+            hdr_title = row_lbl.get_label() if row_lbl is not None else ""
+            if hdr_title:
+                self.title.set_title(hdr_title)
+                self.title.set_tooltip_text(hdr_title)
+                self.content_page.set_title(hdr_title)
 
     def _on_sample(self, hub) -> None:
         self._sync_sidebar_hardware(hub.info)
@@ -560,7 +590,9 @@ class MainWindow(Adw.ApplicationWindow):
         if self.current:
             page = self.pages.get_built(self.current)
             if page is not None:
-                if getattr(page, "is_monitor_page", False):
+                if hasattr(page, "refresh_temperature_unit"):
+                    page.refresh_temperature_unit()
+                elif getattr(page, "is_monitor_page", False):
                     page.update()
                 else:
                     page.refresh()
@@ -624,8 +656,8 @@ class MainWindow(Adw.ApplicationWindow):
         sec_nav = Gtk.ShortcutsSection(section_name="navigation", title="General", visible=True)
         grp_app = Gtk.ShortcutsGroup(title="Window & navigation", visible=True)
         for accel, desc in (("<Control>k", "Jump to page"),
-                            ("<Control>r", "Refresh active page"),
-                            ("<Control>question", "Keyboard shortcuts"),
+                            ("<Control>r F5", "Refresh active page"),
+                            ("<Control>question F1", "Keyboard shortcuts"),
                             ("<Control>w", "Close window"),
                             ("<Control>q", "Quit Asusius")):
             grp_app.append(Gtk.ShortcutsShortcut(accelerator=accel, title=desc, visible=True))

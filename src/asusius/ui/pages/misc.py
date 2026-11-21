@@ -11,8 +11,8 @@ from ... import __version__
 from ..widgets import label
 from .base import Page, button, pill, prefs_page, wrap_group_title
 
-REPO_URL = "https://github.com/hamza-gouda1/Asusius"
-ISSUES_URL = "https://github.com/hamza-gouda1/Asusius/issues"
+REPO_URL = "https://github.com/hamza-gouda1/asusius"
+ISSUES_URL = "https://github.com/hamza-gouda1/asusius/issues"
 
 CAP_TITLES = {
     "profile": "Power profile",

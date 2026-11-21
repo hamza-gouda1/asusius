@@ -12,15 +12,18 @@
 
 /* dashboard cards: the FlowBoxChild is the click target */
 flowboxchild.card-child { padding: 0; border-radius: 16px; outline-offset: 2px; }
-flowboxchild.card-child:hover > .metric-card {
+flowboxchild.card-child:hover > .metric-card,
+flowboxchild.card-child:focus-visible > .metric-card {
   border-color: alpha(@accent_bg_color, 0.45);
   background-color: mix(@card_bg_color, @accent_bg_color, 0.04);
 }
 flowboxchild.card-child:active > .metric-card { background-color: mix(@card_bg_color, @accent_bg_color, 0.08); }
 .metric-card { padding: 20px 18px 14px 18px; }
 .metric-card .stat-value { font-size: 34px; }
+.metric-card .stat-value.stat-status { font-size: 20px; font-weight: 600; }
 .card-go { opacity: 0.0; -gtk-icon-size: 14px; }
-flowboxchild.card-child:hover .card-go { opacity: 0.55; }
+flowboxchild.card-child:hover .card-go,
+flowboxchild.card-child:focus-visible .card-go { opacity: 0.55; }
 
 /* detail pages */
 .monitor-panel { padding: 20px 16px 20px 16px; }

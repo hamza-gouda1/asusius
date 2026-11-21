@@ -3,6 +3,7 @@
 """Lightweight persisted UI preferences (appearance scheme, temperature unit)."""
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import tempfile
@@ -56,12 +57,21 @@ def save_prefs(**updates) -> dict:
     _cache = dict(data)
     _cache_path = path
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         fd, tmp = tempfile.mkstemp(prefix=".ui-", suffix=".json", dir=str(path.parent))
         try:
             with os.fdopen(fd, "w") as fh:
+                os.fchmod(fh.fileno(), 0o600)
                 json.dump(data, fh, indent=2)
+                fh.flush()
+                os.fsync(fh.fileno())
             os.replace(tmp, path)
+            with contextlib.suppress(OSError):
+                dfd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(dfd)
+                finally:
+                    os.close(dfd)
         except Exception:
             try:
                 os.unlink(tmp)

@@ -83,6 +83,8 @@ def window_points(times, values, idx_iter, slot, t0: float, t1: float, width: fl
     """
     span = t1 - t0
     if span <= 0 or width <= 0:
+        out_x.clear()
+        out_y.clear()
         return 0
     nb = max(2, int(width / bucket_px))
     n = 0

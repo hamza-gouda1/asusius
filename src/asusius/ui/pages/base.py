@@ -129,12 +129,6 @@ def pill(text: str, *css: str) -> Gtk.Label:
     return lab
 
 
-def soon_badge() -> Gtk.Label:
-    lab = label("COMING SOON", ("soon",), xalign=0.5)
-    lab.set_valign(Gtk.Align.CENTER)
-    return lab
-
-
 def button(text: str, *css: str, icon: str | None = None, on_click=None) -> Gtk.Button:
     if icon:
         b = Gtk.Button(child=Adw.ButtonContent(label=text, icon_name=icon))

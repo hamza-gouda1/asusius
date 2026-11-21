@@ -66,6 +66,8 @@ class LiveHub:
         self.running = False
         self.hold = False  # screenshot harness: drive ticks by hand with a fake clock
         self.ticks = 0
+        self.last_error: str | None = None
+        self._error_count = 0
         self.procs_wanted = False
         self.procs: list = []
         self.procs_t = -1e9
@@ -214,9 +216,15 @@ class LiveHub:
             return GLib.SOURCE_REMOVE
         exc = fut.exception()
         if exc is not None:
-            import sys
-            print(f"telemetry tick failed: {exc!r}", file=sys.stderr)
+            msg = f"telemetry tick failed: {exc!r}"
+            self._error_count += 1
+            if msg != self.last_error:
+                import sys
+                self.last_error = msg
+                print(msg, file=sys.stderr)
             return GLib.SOURCE_REMOVE
+        self.last_error = None
+        self._error_count = 0
         now, vals, info, procs, epoch = fut.result()
         self.sampler.commit(now, vals, info)
         self._record_voltage()
@@ -232,6 +240,10 @@ class LiveHub:
 
         The epoch+wanted guards live in _collect, so a delivery here already
         passed them."""
+        if self._closed:
+            return
+        if self._busy:
+            raise RuntimeError("collect_now called while async tick is in flight")
         now, vals, info, procs, _epoch = self._collect(now)
         self.sampler.commit(now, vals, info)
         self._record_voltage()
@@ -498,12 +510,3 @@ class LiveHub:
             self._voltage_pending = False
 
         run_bg(work, done=finish, error=finish)
-
-
-def rss_kib() -> int | None:
-    """This process's resident set (About page / PERFORMANCE.md figures)."""
-    try:
-        with open(f"/proc/{os.getpid()}/statm") as fh:
-            return int(fh.read().split()[1]) * os.sysconf("SC_PAGE_SIZE") // 1024
-    except OSError:
-        return None

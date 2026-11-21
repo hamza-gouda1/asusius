@@ -69,6 +69,7 @@ class MonitorPage(Page):
 
     def chart(self, lines: list[Line], **kw) -> Chart:
         kw["height"] = int(kw.get("height", 120) * 1.3)  # roomier than the first cut
+        kw.setdefault("monitor", True)
         c = Chart(self.hub, lines, **kw)
         self.charts.append(c)
         return c

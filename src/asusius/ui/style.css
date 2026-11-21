@@ -50,7 +50,7 @@ switch:checked { background-color: @accent_bg_color; }
 switch:checked > slider { background-color: @accent_fg_color; }
 
 /* numerals */
-.stat-value, .mini-value, .scale-value, .mono {
+.stat-value, .mini-value, .scale-value {
   font-family: "@MONO@", monospace;
   font-feature-settings: "tnum";
 }
@@ -100,7 +100,6 @@ switch:checked > slider { background-color: @accent_fg_color; }
 .stat-sub .numeric { font-size: 1em; }
 .mini-value { font-size: 19px; font-weight: 600; }
 .mini-label { font-size: 0.8em; opacity: 0.72; }
-.sparkline { margin-top: 10px; }
 
 .hero-heading { font-size: 26px; font-weight: 700; }
 .section-caption { font-size: 0.85em; opacity: 0.72; }
@@ -112,10 +111,6 @@ switch:checked > slider { background-color: @accent_fg_color; }
 }
 .pill.accent { background-color: alpha(@accent_bg_color, 0.16); color: @accent_color; }
 .pill.gold { background-color: alpha(@gold_color, 0.18); color: @window_fg_color; }
-.soon {
-  border-radius: 999px; padding: 1px 9px; font-size: 0.75em; font-weight: 700;
-  letter-spacing: 0.04em; background-color: alpha(@gold_color, 0.22);
-}
 
 /* profile cards */
 .profile-card {
@@ -145,9 +140,6 @@ switch:checked > slider { background-color: @accent_fg_color; }
 /* keyboard preview */
 .kbd-preview { border-radius: 14px; min-height: 120px; }
 button.palette-button { padding: 4px; min-width: 0; min-height: 0; }
-
-/* disabled-looking "coming soon" groups */
-.dimmed-group { opacity: 0.55; }
 
 /* about */
 .about-name { font-size: 26px; font-weight: 800; }
@@ -241,7 +233,7 @@ banner button {
 entry > text > placeholder, searchentry > text > placeholder { opacity: 0.72; }
 
 /* Bars: the sidebar's and the content's header are the same height, so the lines meet. */
-headerbar { min-height: 50px; }
+headerbar.main-headerbar { min-height: 50px; }
 
 /* The content pane reads larger than the stock 11 pt (about +2 px) and rows breathe. */
 .content-area { font-size: 1.14em; }
