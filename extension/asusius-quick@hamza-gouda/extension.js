@@ -321,9 +321,14 @@ export default class AsusiusQuickExtension extends Extension {
                     return id;
                 },
                 cancel: id => GLib.source_remove(id),
-                show: profile => Main.osdWindowManager.show(-1,
-                    Gio.ThemedIcon.new_from_names([ICONS[profile] ?? ICONS.balanced, APP_SYMBOLIC_ICON]),
-                    LABELS[profile] ?? profile, null),
+                show: profile => {
+                    const icon = Gio.ThemedIcon.new_from_names([ICONS[profile] ?? ICONS.balanced, APP_SYMBOLIC_ICON]);
+                    const label = LABELS[profile] ?? profile;
+                    if (typeof Main.osdWindowManager.showAll === 'function')
+                        Main.osdWindowManager.showAll(icon, label, null);
+                    else
+                        Main.osdWindowManager.show(-1, icon, label, null);
+                },
             });
             this._indicator = new ProfileIndicator(this._model, this._asusd, this._gpu, this._announcer);
             Main.panel?.statusArea?.quickSettings?.addExternalIndicator(this._indicator);

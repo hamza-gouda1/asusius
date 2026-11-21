@@ -2,6 +2,7 @@
 // Copyright (C) Hamza Gouda
 // Run: gjs -m tests/test_app_drag.js
 
+import System from 'system';
 import * as D from '../extension/asusius-quick@hamza-gouda/drag_switcher.js';
 
 let failed = 0, passed = 0;
@@ -188,4 +189,4 @@ function fixture({reduced = false, minimized = false, queued = false, clipActors
 
 print(`${passed} passed, ${failed} failed`);
 if (failed)
-    imports.system.exit(1);
+    System.exit(1);

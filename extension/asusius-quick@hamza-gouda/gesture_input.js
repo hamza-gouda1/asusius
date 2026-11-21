@@ -46,7 +46,7 @@ export function createGestureInput(main) {
         actor,
         activate: window => main.activateWindow(window, global.get_current_time()),
         animationsEnabled: () => St.Settings.get().enable_animations,
-        skipEffect: windowActor => main.wm.skipNextEffect(windowActor),
+        skipEffect: windowActor => main.wm?.skipNextEffect?.(windowActor),
         // Always use onStopped (runs on interruption as well as completion) so interrupted eases cannot wedge drags.
         settle: (windowActor, properties, done) => windowActor.ease({...properties,
             mode: Clutter.AnimationMode.EASE_OUT_CUBIC, onStopped: done}),
@@ -151,7 +151,9 @@ export function createGestureInput(main) {
             if (!key)
                 return;
             try {
-                keyboard ??= Clutter.get_default_backend().get_default_seat()
+                const backend = global.stage?.get_context?.()?.get_backend?.()
+                    ?? Clutter.get_default_backend();
+                keyboard ??= backend.get_default_seat()
                     .create_virtual_device(Clutter.InputDeviceType.KEYBOARD_DEVICE);
                 const now = GLib.get_monotonic_time();
                 keyboard.notify_keyval(now, key, Clutter.KeyState.PRESSED);
