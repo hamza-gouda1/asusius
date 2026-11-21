@@ -20,18 +20,76 @@ def pct(v, digits: int = 0) -> str:
     return f"{v:.{digits}f} %" if ok(v) else DASH
 
 
-def bytes_(v, digits: int = 1) -> str:
-    """Binary units, as `free -h` and file managers' 'GiB' figures."""
+def _scaled(v, units: tuple[str, ...], base: float, digits: int,
+            *, zero_digits_first: bool = True) -> str:
     if not ok(v):
         return DASH
     v = float(v)
-    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
-        if abs(v) < 1024 or unit == "TiB":
-            if unit == "B":
-                return f"{v:.0f} B"
-            return f"{v:.{digits}f} {unit}"
-        v /= 1024
-    return DASH
+    for idx, unit in enumerate(units):
+        d = 0 if (idx == 0 and zero_digits_first) else digits
+        if idx == len(units) - 1 or round(abs(v), d) < base:
+            return f"{v:.{d}f} {unit}"
+        v /= base
+    return DASH  # pragma: no cover
+
+
+class StickyUnit:
+    """Unit formatter with hysteresis so values near a unit boundary stay steady."""
+
+    def __init__(self, units: tuple[str, ...], base: float, digits: int = 1,
+                 hysteresis: float = 1.25, *, zero_digits_first: bool = True) -> None:
+        self.units = units
+        self.base = base
+        self.digits = digits
+        self.hysteresis = hysteresis
+        self.zero_digits_first = zero_digits_first
+        self._idx: int | None = None
+
+    def _digits_for(self, idx: int) -> int:
+        return 0 if (idx == 0 and self.zero_digits_first) else self.digits
+
+    def _pick(self, abs_v: float) -> int:
+        for idx in range(len(self.units)):
+            d = self._digits_for(idx)
+            if idx == len(self.units) - 1 or round(abs_v, d) < self.base:
+                return idx
+            abs_v /= self.base
+        return len(self.units) - 1  # pragma: no cover
+
+    def __call__(self, v) -> str:
+        if not ok(v):
+            return DASH
+        val = float(v)
+        av = abs(val)
+        if self._idx is None:
+            self._idx = self._pick(av)
+        else:
+            idx = self._idx
+            while idx < len(self.units) - 1:
+                d = self._digits_for(idx)
+                if round(av / (self.base ** idx), d) >= self.base:
+                    idx += 1
+                else:
+                    break
+            while idx > 0 and av < (self.base ** idx) / self.hysteresis:
+                idx -= 1
+            self._idx = idx
+        idx = self._idx
+        d = self._digits_for(idx)
+        return f"{val / (self.base ** idx):.{d}f} {self.units[idx]}"
+
+
+def sticky_bytes(digits: int = 1, hysteresis: float = 1.25) -> StickyUnit:
+    return StickyUnit(("B", "KiB", "MiB", "GiB", "TiB"), 1024.0, digits, hysteresis)
+
+
+def sticky_rate(digits: int = 1, hysteresis: float = 1.25) -> StickyUnit:
+    return StickyUnit(("B/s", "kB/s", "MB/s", "GB/s"), 1000.0, digits, hysteresis)
+
+
+def bytes_(v, digits: int = 1) -> str:
+    """Binary units, as `free -h` and file managers' 'GiB' figures."""
+    return _scaled(v, ("B", "KiB", "MiB", "GiB", "TiB"), 1024.0, digits)
 
 
 def split_bytes(v, digits: int = 1) -> tuple[str, str]:
@@ -41,31 +99,20 @@ def split_bytes(v, digits: int = 1) -> tuple[str, str]:
 
 def rate(v, digits: int = 1) -> str:
     """Bytes per second in decimal units (kB/s, MB/s), like network tools."""
-    if not ok(v):
-        return DASH
-    v = float(v)
-    for unit in ("B/s", "kB/s", "MB/s", "GB/s"):
-        if abs(v) < 1000 or unit == "GB/s":
-            return f"{v:.0f} {unit}" if unit == "B/s" else f"{v:.{digits}f} {unit}"
-        v /= 1000
-    return DASH
+    return _scaled(v, ("B/s", "kB/s", "MB/s", "GB/s"), 1000.0, digits)
 
 
 def bits(v) -> str:
     if not ok(v):
         return DASH
-    v = float(v) * 8
-    for unit in ("bit/s", "kbit/s", "Mbit/s", "Gbit/s"):
-        if abs(v) < 1000 or unit == "Gbit/s":
-            return f"{v:.0f} {unit}" if unit == "bit/s" else f"{v:.1f} {unit}"
-        v /= 1000
-    return DASH
+    return _scaled(float(v) * 8, ("bit/s", "kbit/s", "Mbit/s", "Gbit/s"), 1000.0, 1)
 
 
 def mhz(v) -> str:
     if not ok(v):
         return DASH
-    return f"{v / 1000:.2f} GHz" if v >= 1000 else f"{v:.0f} MHz"
+    v = float(v)
+    return f"{v / 1000:.2f} GHz" if round(v) >= 1000 else f"{v:.0f} MHz"
 
 
 def temp(v) -> str:
@@ -97,9 +144,13 @@ def duration(seconds) -> str:
 
 
 def hours(h) -> str:
-    if not ok(h):
+    if not ok(h) or h < 0:
         return DASH
     m = int(round(h * 60))
+    if m == 0:
+        return "0 min"
+    if m < 60:
+        return f"{m} min"
     return f"{m // 60} h {m % 60:02d} min"
 
 
@@ -107,9 +158,9 @@ def count(v) -> str:
     if not ok(v):
         return DASH
     v = float(v)
-    if v >= 1e6:
+    if round(v / 1e3) >= 1000:
         return f"{v / 1e6:.1f} M"
-    if v >= 1e4:
+    if round(v) >= 1e4:
         return f"{v / 1e3:.0f} k"
     return f"{v:.0f}"
 

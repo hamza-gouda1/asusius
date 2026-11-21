@@ -190,7 +190,8 @@ def human_size(n: int | None) -> str:
         return ""
     v = float(n)
     for unit in ("B", "kB", "MB", "GB"):
-        if v < 1000 or unit == "GB":
-            return f"{v:.0f} {unit}" if unit in ("B", "kB") else f"{v:.1f} {unit}"
+        d = 0 if unit in ("B", "kB") else 1
+        if round(abs(v), d) < 1000 or unit == "GB":
+            return f"{v:.{d}f} {unit}"
         v /= 1000
     return ""  # pragma: no cover

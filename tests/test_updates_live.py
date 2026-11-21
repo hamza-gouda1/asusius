@@ -202,6 +202,8 @@ class RunStateTests(unittest.TestCase):
         self.assertEqual(progress.fmt_duration(3675), "1:01:15")
         self.assertEqual(progress.fmt_duration(None), "")
         self.assertEqual(progress.fmt_speed(2.5e6), "2.5 MB/s")
+        self.assertEqual(progress.fmt_speed(999.6), "1.0 kB/s")
+        self.assertEqual(progress.fmt_speed(999_990), "1.0 MB/s")
         self.assertEqual(progress.fmt_speed(500), "500 B/s")
 
 

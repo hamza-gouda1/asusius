@@ -144,7 +144,10 @@ def fmt_duration(s: float | None) -> str:
 def fmt_speed(bps: float | None) -> str:
     if not bps:
         return ""
-    for unit, size in (("GB/s", 1e9), ("MB/s", 1e6), ("kB/s", 1e3)):
-        if bps >= size:
-            return f"{bps / size:.1f} {unit}"
-    return f"{bps:.0f} B/s"
+    v = float(bps)
+    for unit in ("B/s", "kB/s", "MB/s", "GB/s"):
+        d = 0 if unit == "B/s" else 1
+        if round(abs(v), d) < 1000 or unit == "GB/s":
+            return f"{v:.{d}f} {unit}"
+        v /= 1000
+    return ""  # pragma: no cover
