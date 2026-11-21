@@ -9,14 +9,17 @@ on:
         required: true
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 jobs:
   archives:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          ref: ${{ inputs.tag }}
       - name: Verify release tag matches pyproject.toml version
         env:
           RELEASE_TAG: ${{ inputs.tag }}
@@ -29,6 +32,18 @@ jobs:
           if tag != f"v{version}":
               raise SystemExit(f"Tag {tag!r} does not match pyproject.toml version {version!r}")
           PY
+      - name: Install GTK, GLib and a virtual display for release verification
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends python3-apt python3-gi python3-gi-cairo python3-pil python3-yaml gir1.2-gtk-4.0 gir1.2-adw-1 libglib2.0-bin gsettings-desktop-schemas xvfb xauth
+      - name: Ruff
+        uses: astral-sh/ruff-action@v3
+        with:
+          args: "check src tests tools"
+      - name: Run unit tests and version sync check
+        run: |
+          PYTHONPATH=src python3 -m unittest tests/test_version_sync.py -v
+          GSETTINGS_BACKEND=memory GTK_A11Y=none PYTHONPATH=src xvfb-run -a python3 -m unittest discover -s tests -v
       - name: Clean dist and build deterministic source archive and checksum
         env:
           RELEASE_TAG: ${{ inputs.tag }}
@@ -36,6 +51,12 @@ jobs:
           rm -rf dist
           python3 tools/release_archive.py --tag "$RELEASE_TAG" --out dist
           (cd dist && sha256sum -c SHA256SUMS)
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
       - name: Attach archive and checksum to the selected release
         uses: softprops/action-gh-release@v2
         with:

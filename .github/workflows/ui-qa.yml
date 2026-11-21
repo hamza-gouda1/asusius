@@ -2,14 +2,17 @@
 # Copyright (C) Hamza Gouda
 name: Full UI QA
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
   schedule:
     - cron: '17 4 * * 1'
 permissions:
   contents: read
 concurrency:
-  group: full-ui-qa
-  cancel-in-progress: false
+  group: ui-qa-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   matrix:
     runs-on: ubuntu-24.04
@@ -26,7 +29,11 @@ jobs:
           sudo systemctl start "user@$(id -u).service"
           echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+      - name: Run quick headless UI QA gate (PR / push)
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        run: timeout -k 10 900 python3 tests/ui/qa_lint.py --quick --report tests/ui/qa_report.md
       - name: Run every size, theme and stress mode with fake hardware
+        if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
         run: timeout -k 10 4800 python3 tests/ui/qa_lint.py --report tests/ui/qa_report.md
       - name: Upload the complete QA report
         if: always()

@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   python:
     runs-on: ubuntu-24.04
@@ -24,7 +28,43 @@ jobs:
       - name: Ruff
         uses: astral-sh/ruff-action@v3
         with:
-          args: "check src tests"
+          args: "check src tests tools"
+
+  python-313:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install pure-Python test dependency
+        run: python -m pip install pyyaml
+      - name: Pure-Python unit tests on Python 3.13
+        run: |
+          PYTHONPATH=src python - <<'PY'
+          import pathlib, re, sys, unittest
+
+          skip = {
+              "tests/test_backend_fixes.py",
+              "tests/test_page_option.py",
+              "tests/test_services.py",
+              "tests/ui/test_stat_grid.py",
+          }
+          loader = unittest.TestLoader()
+          suite = unittest.TestSuite()
+          for p in sorted(pathlib.Path("tests").rglob("test_*.py")):
+              rel = p.as_posix()
+              if rel in skip:
+                  continue
+              txt = p.read_text(encoding="utf-8")
+              if re.search(r"^\s*(import|from)\s+(gi|PIL)\b", txt, re.M):
+                  continue
+              suite.addTests(loader.discover(str(p.parent), pattern=p.name, top_level_dir="tests"))
+          res = unittest.TextTestRunner(verbosity=2).run(suite)
+          sys.exit(0 if res.wasSuccessful() else 1)
+          PY
 
   packaging:
     runs-on: ubuntu-24.04
