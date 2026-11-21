@@ -43,6 +43,13 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.3.1" date="2026-11-22">
+      <description>
+        <p>Stabilized telemetry unit formatting, fan-key mapping, per-core temperature units,
+        battery controls and keyboard chart navigation, backend D-Bus and update locking,
+        GNOME 49 extension compatibility, and CI/release verification.</p>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-11-17">
       <description>
         <p>Expanded system monitoring with disk usage analysis, process inspection,

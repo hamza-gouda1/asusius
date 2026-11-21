@@ -1,6 +1,6 @@
 # Release checks
 
-Reviewed on 2026-11-21. The check uses fake hardware and recorded system-service
+Reviewed on 2026-11-22. The check uses fake hardware and recorded system-service
 transactions; no package updates, firmware flashes or hardware writes were performed.
 
 - Unit suite: 1099 discovered tests run (2 intentional skips), plus 45 standalone tests in
@@ -64,7 +64,7 @@ immutable.
   release notes updated to reference `asusius-0.2.0.tar.gz` and its matching SHA-256.
 - **GitHub Issue `#3`**: updated to instruct testers to run `asusius capabilities --json`.
 
-### Audit & CI hardening notes (`v0.3.0`, 2026-11-21)
+### Audit & CI hardening notes (`v0.3.1`, 2026-11-22)
 
 - Fixed telemetry unit churn (`fmt.sticky_bytes`, `fmt.sticky_rate`, pre-threshold rounding),
   fan-key collisions in `sensors.py`, `CoreGrid` `°F` formatting, and Battery range-chip toggle guard

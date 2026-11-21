@@ -1,10 +1,10 @@
 # A 15-minute hardware report
 
-Use this checklist on an ASUS laptop with Asusius 0.3.0 already installed from
-[the release](https://github.com/hamza-gouda1/asusius/releases/tag/v0.3.0).
+Use this checklist on an ASUS laptop with Asusius 0.3.1 already installed from
+[the release](https://github.com/hamza-gouda1/asusius/releases/tag/v0.3.1).
 Installation time is separate. Run the commands as your desktop user in a terminal.
 Close the simulated demo and open the installed app for these checks. Confirm the
-version in **About** is 0.3.0. In the collection terminal,
+version in **About** is 0.3.1. In the collection terminal,
 `echo "${ASUSIUS_FAKE_ROOT:-}"` should print a blank line. If it prints a path, open
 a terminal outside the demo environment before collecting readings.
 Confirm the installed app itself does not show **Fake hardware (safe)** in its sidebar;

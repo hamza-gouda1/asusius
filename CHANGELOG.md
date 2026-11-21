@@ -4,6 +4,35 @@ All notable changes to this project. Format follows Keep a Changelog; versions f
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-22
+
+### Added
+- Sticky telemetry formatters (`fmt.sticky_bytes`, `fmt.sticky_rate`) with hysteresis to
+  prevent unit churn on oscillating readouts.
+- Keyboard navigation (`Left`/`Right`/`Home`/`End`/`Escape`), hairline cursor, and accessible
+  labels in the UPower battery `HistoryChart`.
+- Bounded-timeout D-Bus helper (`dbusutil.connect_bus_sync`) and read-only backend write
+  validation (`validate_write`) on `--dry-run`.
+- GNOME 49 runtime feature detection in the Quick Settings extension.
+- GitHub Actions hardening: workflow `concurrency`, Python 3.13 pure-Python CI job, push/PR
+  `--quick` UI QA gating, pre-release Ruff + unit test gates, and build provenance attestation.
+
+### Changed
+- Expanded `[tool.ruff.lint]` to `select = ["E", "F"]` across `src`, `tests`, and `tools`.
+- Consolidated process table column definitions and header tooltips into `process_rows.py`,
+  preserved parked monitor page state across 30 s rebuilds, and cached CPU `scaling_governor`
+  off the GTK main thread.
+- Updated `CONTRIBUTING.md`, `docs/ARCHITECTURE.md`, `docs/UI.md`, and `docs/RELEASE_CHECKS.md`.
+
+### Fixed
+- Pre-threshold rounding in telemetry and update formatters (`fmt.bytes_`, `fmt.rate`,
+  `fmt.bits`, `fmt.mhz`, `fmt.count`, `fmt.hours`, `human_size`, `fmt_speed`).
+- Fan-key collisions (`"CPU Fan"` vs `"CPU Opt"`) in `sensors.py`, `CoreGrid` `°F` per-core
+  temperatures, and Battery range-chip toggle guard.
+- `nvidia-smi` rate-limited ring gaps and idle heuristics, update scheduler lock contention and
+  private `0o700`/`0o600` lockfiles, silent daemon scheduler exceptions, proc/sysfs/network/MCP
+  edge cases, treemap hover overriding keyboard focus, and UI singular/plural copy.
+
 ## [0.3.0] - 2026-11-17
 
 ### Added

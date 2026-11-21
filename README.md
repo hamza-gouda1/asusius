@@ -127,7 +127,7 @@ so this table can be filled in with real results.
 
 Try the released GUI with simulated data first: [two-minute hardware-free quickstart](docs/QUICKSTART.md).
 
-    git clone --branch v0.3.0 --depth 1 https://github.com/hamza-gouda1/asusius.git
+    git clone --branch v0.3.1 --depth 1 https://github.com/hamza-gouda1/asusius.git
     cd asusius
     ./install.sh --dry-run
     ./install.sh
