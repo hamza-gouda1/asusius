@@ -212,7 +212,7 @@ class GioPortalBus:  # pragma: no cover - needs a desktop session and a user's c
         return box["results"]
 
     def open_pipewire_remote(self, session: str) -> int:
-        GLib, Gio = self.GLib, self.Gio
+        GLib = self.GLib
         res, fds = self.conn.call_with_unix_fd_list_sync(
             PORTAL, PORTAL_PATH, SCREENCAST, "OpenPipeWireRemote",
             GLib.Variant("(oa{sv})", (session, {})), GLib.VariantType("(h)"), 0, 10000,

@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) Hamza Gouda
+import importlib.util
 import json
 import math
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -432,8 +434,12 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(self.aura()["colour1"], [142, 42, 68])
 
 
-@unittest.skipUnless(shutil.which("dbus-run-session") and shutil.which("gdbus"),
-                     "needs dbus-run-session and gdbus")
+@unittest.skipUnless(
+    shutil.which("dbus-run-session")
+    and shutil.which("gdbus")
+    and importlib.util.find_spec("gi") is not None,
+    "needs dbus-run-session, gdbus and PyGObject (gi)",
+)
 class NotificationMonitorBusTest(unittest.TestCase):
     def test_become_monitor_on_private_bus(self):
         code = (
@@ -446,7 +452,7 @@ class NotificationMonitorBusTest(unittest.TestCase):
             "'[]','{}','5000','--timeout','1'],capture_output=True)\n"
             "time.sleep(0.4);ev=m.drain();m.stop();print(ev[0]['app'])\n")
         env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
-        out = subprocess.run(["dbus-run-session", "--", "python3", "-c", code], env=env,
+        out = subprocess.run(["dbus-run-session", "--", sys.executable, "-c", code], env=env,
                              capture_output=True, text=True, timeout=30)
         self.assertEqual(out.stdout.strip(), "Mail", out.stderr[-500:])
 

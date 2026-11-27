@@ -13,6 +13,7 @@ from .core import (
     BackendError,
     BackendUnavailable,
     Capability,
+    CapStatus,
     FanCurve,
     FirmwareAttribute,
     GpuAction,
